@@ -426,27 +426,37 @@ involves ROS 2 topics at all; **Path B** (the recommended one, §7 gap 2) bypass
 and hands each message straight into the C++ API, which is where this project's deterministic accuracy
 ceiling is measured (§4.4 of the main README).
 
+The only real reference is the **ROS 1** node
+[`ros_stereo_inertial.cc`](Examples_old/ROS/ORB_SLAM3/src/ros_stereo_inertial.cc); the solid box below
+is what it *actually* does, the dashed box is what a ROS 2 port would still have to **add** — nothing in
+the dashed box exists upstream.
+
 ```
- ── PATH A · online — a ROS 2 node (does not exist upstream, must be written) ─────────────────────────
+ ── PATH A · online ROS node ──────────────────────────────────────────────────────────────────────────
+    Real reference (ROS 1, rosbuild): Examples_old/ROS/ORB_SLAM3/src/ros_stereo_inertial.cc
 
-   TOPIC (from CARLA rosbag2 / live bridge)      RATE    MSG TYPE
-   /carla/ego_vehicle/cam_front_left/image   ─┐  20 Hz   sensor_msgs/Image
-   /carla/ego_vehicle/cam_front_right/image  ─┤  20 Hz   sensor_msgs/Image      ┌────────────────────────┐
-                                              ├─ message_filters ApproxTime ──▶ │  orbslam3_stereo_node  │
-   /carla/ego_vehicle/imu ─────────────────── ┘  200 Hz  sensor_msgs/Imu        │  buffer IMU, then      │
-                                                  (buffered between frames)      │  SLAM.TrackStereo(     │
-                                                                                 │    imLeft, imRight,    │
-                                                                                 │    t, vImuMeas)        │
-                                                                                 └───────────┬────────────┘
-                                                                    publishes                │
-                                                       /orbslam3/pose        geometry_msgs/PoseStamped
-                                                       /orbslam3/odometry    nav_msgs/Odometry
-                                                       /orbslam3/map_points  sensor_msgs/PointCloud2
-                                                       /orbslam3/keyframes   visualization_msgs/MarkerArray
-                                                       /tf                   world → body (camera)
+    SUBSCRIBES — 3 plain ros::Subscriber, no message_filters (:141-143)
+    /camera/left/image_raw   sensor_msgs/Image ─┐   per-topic          ╔══════════════════════════════╗
+    /camera/right/image_raw  sensor_msgs/Image ─┤   buffers + mutexes  ║ ros_stereo_inertial          ║
+    /imu                     sensor_msgs/Imu   ─┘ → SyncWithImu() thread║  rectify → TrackStereo(      ║
+                                                     (:145, :196)       ║    imLeft, imRight, t,       ║
+                                                                        ║    vImuMeas)                 ║
+    PUBLISHES — NONE.  No advertise() anywhere; no SaveTrajectory.      ║  output: Pangolin viewer     ║
+    The node's only output is the live Pangolin window.                 ║  only (ros::spin → return)   ║
+                                                                        ╚══════════════════════════════╝
+    To feed it CARLA data, REMAP the bag topics onto the node's names:
+       /carla/ego_vehicle/cam_front_left/image   → /camera/left/image_raw
+       /carla/ego_vehicle/cam_front_right/image  → /camera/right/image_raw
+       /carla/ego_vehicle/imu                    → /imu
+       /carla/ego_vehicle/gnss      ─ dropped   (ORB-SLAM3 has no global input, §3 / §5.4)
+       /carla/ego_vehicle/odometry  ─ ground truth → APE evaluator only, never enters the node (§3)
 
-   /carla/ego_vehicle/gnss     ─ ✗ NOT subscribed — ORB-SLAM3 has no global-sensor input (§3, §5.4)
-   /carla/ego_vehicle/odometry ─ ground truth only → APE evaluator; never enters the SLAM node (§3)
+    ┌ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ┐
+      A ROS 2 port must (a) move to rclcpp (gap 1) and (b) ADD publishers — DESIGN CHOICE, not upstream.
+    │ A useful set: /orbslam3/pose (PoseStamped) · /odometry (Odometry) · /map_points (PointCloud2)     │
+      · /tf (world→body).  Get the pose from TrackStereo's returned Sophus::SE3f (Tcw); the map-side
+    │ topics expose the Atlas that §5.5 says to log (map count / merge count).                          │
+    └ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ┘
 
  ── PATH B · offline bag-reader (recommended, deterministic, ~10× faster) ─────────────────────────────
 
@@ -459,12 +469,14 @@ Three things about this graph are ORB-SLAM3-specific and worth stating explicitl
 - **`/carla/ego_vehicle/gnss` has no consumer.** Unlike VINS-Fusion's `global_fusion` stage, ORB-SLAM3
   takes no global input — the `*+gps` variants of main README §4.5 have no counterpart here (§3), and
   drift is bounded by loop closure instead (§5.4).
-- **The stereo pair must be time-synchronised before the call.** `TrackStereo` takes one timestamp for
-  both images, so a `message_filters` `ApproximateTime` (or exact) sync is required; the 200 Hz IMU is
-  buffered and the samples falling between consecutive frames are passed as `vImuMeas`.
-- **The map-side outputs (`/orbslam3/map_points`, `/orbslam3/keyframes`) are new topics** with no
-  VINS-Fusion analogue — they expose the persistent Atlas, and the Atlas map count / merge count that
-  §5.5 argues must be logged alongside APE come from here, not from any single pose topic.
+- **The reference node does its own thread-based sync, not `message_filters`.** `TrackStereo` takes one
+  timestamp for both images, and the stereo-inertial node satisfies that with the manual `SyncWithImu()`
+  thread above — buffering the 200 Hz IMU and passing the samples between consecutive frames as
+  `vImuMeas`. (The *non-inertial* [`ros_stereo.cc`](Examples_old/ROS/ORB_SLAM3/src/ros_stereo.cc) is the
+  one that uses `message_filters`.)
+- **Every output topic is a port-time design choice, not an upstream fact.** The reference node publishes
+  nothing; the persistent Atlas (and the map count / merge count §5.5 argues for logging) is reachable
+  through the C++ API but is not exposed on any topic until a port adds one.
 
 ---
 
