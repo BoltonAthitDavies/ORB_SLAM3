@@ -84,6 +84,40 @@ The paper draws three threads. **The code spawns only two** — `Tracking` runs 
 That matters for a closed-loop CARLA port: tracking cost lands directly in your control cycle, while
 mapping and loop closure are genuinely asynchronous.
 
+The thread table says *what* runs and at what rate; the `System` **constructor** shows *how one object
+wires them together* — including the fact the table omits, that all three threads point at a **single**
+Atlas. The box is one `ORB_SLAM3::System` object and its member pointers *are* the "detail inside":
+
+```
+   ORB_SLAM3::System object  (one process; constructed at System.cc:96)
+   ───────────────────────────────────────────────────────────────────
+
+   TrackStereo(imLeft, imRight, t, vImuMeas)  ── direct C++ call, NOT a ROS topic
+        │
+        ▼
+   [ Tracking      mpTracker ]      new: System.cc:191   ·  runs in the CALLER's thread (System.h:233-234)
+        │  new KeyFrame  (link set System.cc:217)            pose/frame · KF decision · relocalization
+        ▼
+   [ LocalMapping  mpLocalMapper ]  new + thread: System.cc:195-197   ·  local-map mgmt · local BA · IMU init
+        │  KeyFrame  (link set System.cc:221)
+        ▼
+   [ LoopClosing   mpLoopCloser ]   new + thread: System.cc:213-214   ·  place-recog · pose-graph · merge · full BA
+
+   shared state — the SAME pointers are handed to all three (ctor args System.cc:192, :195, :213):
+        Atlas             mpAtlas             System.cc:132   every KeyFrame + MapPoint, active & non-active maps
+        KeyFrameDatabase  mpKeyFrameDatabase  System.cc:128   DBoW2 index for loop closure / relocalization
+        ORBVocabulary     mpVocabulary        System.cc:117   the word tree (the slow-to-load .txt of §6)
+
+   [ Viewer  mpViewer ]  new + thread: System.cc:233   ·  Pangolin; only if bUseViewer (the ROS node passes true)
+```
+
+Two structural facts fall out of the constructor. **Only two worker threads are spawned** — the two
+`new thread(...)` at `System.cc:197` and `:214`, plus the optional Viewer at `:233`; Tracking has no
+thread of its own. And **all three receive the same `mpAtlas` pointer** (`:192`, `:195`, `:213`), so they
+mutate one shared map. Between ROS nodes that coupling would be topics; here it is shared memory — which
+is exactly why the two mechanisms below exist: the per-thread **queues** that carry the handoff arrows,
+and the **`Map::mMutexMapUpdate`** lock that serializes writes to that one Atlas.
+
 Data moves through three queues, each with its own mutex:
 
 | Edge | Queue | Enqueue |
@@ -429,7 +463,8 @@ ceiling is measured (§4.4 of the main README).
 The only real reference is the **ROS 1** node
 [`ros_stereo_inertial.cc`](Examples_old/ROS/ORB_SLAM3/src/ros_stereo_inertial.cc); the solid box below
 is what it *actually* does, the dashed box is what a ROS 2 port would still have to **add** — nothing in
-the dashed box exists upstream.
+the dashed box exists upstream. (The node is a thin wrapper: the `ORB_SLAM3::System` object *inside* it —
+its two spawned threads and shared Atlas — is expanded in §1.1.)
 
 ```
  ── PATH A · online ROS node ──────────────────────────────────────────────────────────────────────────
