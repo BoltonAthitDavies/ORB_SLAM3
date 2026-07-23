@@ -513,6 +513,54 @@ Three things about this graph are ORB-SLAM3-specific and worth stating explicitl
   nothing; the persistent Atlas (and the map count / merge count §5.5 argues for logging) is reachable
   through the C++ API but is not exposed on any topic until a port adds one.
 
+**The same graph, rendered** — GitHub renders Mermaid natively (the ASCII above stays as the plain-text
+fallback). The `System` internals from §1.1 are folded in as a nested subgraph. Same edge convention as
+the main README's node graph: solid = active data path, **thick** = the one direct API call, dashed =
+proposed / optional / eval-only.
+
+```mermaid
+flowchart LR
+  subgraph SRC["CARLA rosbag2 / native bridge — topics"]
+    IL(["/carla/ego_vehicle/cam_front_left/image"])
+    IR(["/carla/ego_vehicle/cam_front_right/image"])
+    IMU(["/carla/ego_vehicle/imu"])
+    GN(["/carla/ego_vehicle/gnss"])
+    OD(["/carla/ego_vehicle/odometry"])
+  end
+
+  subgraph NODE["ORB-SLAM3 ROS node — ros_stereo_inertial.cc (ROS 1; ROS 2 port = §7 gap 1)"]
+    SYNC(["SyncWithImu() thread · :145 · :196"])
+    subgraph SYS["ORB_SLAM3::System object — System.cc:96"]
+      TRK(["Tracking — runs in caller thread<br/>new :191"])
+      LM(["LocalMapping — own thread<br/>new + thread :195-197"])
+      LC(["LoopClosing — own thread<br/>new + thread :213-214"])
+      AT[("Atlas · KeyFrameDatabase · Vocabulary<br/>:132 · :128 · :117")]
+    end
+  end
+
+  subgraph OUT["Publishers a ROS 2 port must ADD — none exist upstream"]
+    PO(["/orbslam3/pose · /orbslam3/odometry"])
+    MP(["/orbslam3/map_points · /tf"])
+  end
+
+  EVAL(["APE evaluator (offline, §3)"])
+  XG(["✗ no consumer"])
+
+  IL  -- "Image 20 Hz" --> SYNC
+  IR  -- "Image 20 Hz" --> SYNC
+  IMU -- "Imu 200 Hz" --> SYNC
+  SYNC == "TrackStereo(L, R, t, vImuMeas) — direct call :270" ==> TRK
+  TRK -- "new KeyFrame · link :217" --> LM
+  LM  -- "KeyFrame · link :221" --> LC
+  TRK -. "shared Atlas ptr :192" .-> AT
+  LM  -. "shared Atlas ptr :195" .-> AT
+  LC  -. "shared Atlas ptr :213" .-> AT
+  GN  -. "not subscribed — no global input (§3 / §5.4)" .-> XG
+  OD  -. "ground truth only" .-> EVAL
+  TRK -. "SE3f pose (return discarded upstream)" .-> PO
+  AT  -. "map / merge counts (§5.5)" .-> MP
+```
+
 ---
 
 ## 4. Results (from the paper)
