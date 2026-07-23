@@ -366,7 +366,7 @@ grounded in a property of the CARLA rig:
 | Parameter | Stock (EuRoC) | Proposed (CARLA) | Reason — what we know about the rig |
 |-----------|---------------|------------------|--------------------------------------|
 | `Camera.type` | `PinHole` | **`Rectified`** | $\mathbf{T}_{c_1c_2}$ is identity-rotation + pure-$x$ — the pair is already rectified (derived above) |
-| `Camera1.fx/fy` | 458.65 / 457.30 | **480.0 / 480.0** | exact: $f = W/2\tan(\text{FOV}/2) = 960/2\tan 45° = 480$ |
+| `Camera1.fx/fy` | 458.65 / 457.30 | **480.0 / 480.0** | exact: $f = \frac{W}{2\tan(\text{FOV}/2)} = \frac{960}{2\tan 45^\circ} = 480$ |
 | `Camera1.cx/cy` | 367.2 / 248.4 | **480.0 / 360.0** | image centre — CARLA renders an ideal pinhole |
 | `Camera1.k1..p2` | nonzero | **omitted** (`Rectified` takes none) | no lens distortion exists to model |
 | `Camera.width/height` | 752 × 480 | **960 × 720** | sensor config |
@@ -417,6 +417,54 @@ is a fair test of that; the town01 segment (~190 m, does not close) is not.
 established accuracy ceiling and removes DDS frame-drop as a variable. Two ORB-SLAM3-specific metrics
 should be added that VINS-Fusion has no analogue for: **number of maps in the Atlas at the end** (a
 direct count of tracking losses) and **number of loop closures / merges detected**.
+
+### 3.1 ROS 2 topic graph (to be built)
+
+There is **no ROS 2 node upstream** (§7, gap 1) — the graph below is what one *would* wire up, using the
+exact CARLA streams this project already records for VINS. Two ingestion paths exist, and only **Path A**
+involves ROS 2 topics at all; **Path B** (the recommended one, §7 gap 2) bypasses the DDS layer entirely
+and hands each message straight into the C++ API, which is where this project's deterministic accuracy
+ceiling is measured (§4.4 of the main README).
+
+```
+ ── PATH A · online — a ROS 2 node (does not exist upstream, must be written) ─────────────────────────
+
+   TOPIC (from CARLA rosbag2 / live bridge)      RATE    MSG TYPE
+   /carla/ego_vehicle/cam_front_left/image   ─┐  20 Hz   sensor_msgs/Image
+   /carla/ego_vehicle/cam_front_right/image  ─┤  20 Hz   sensor_msgs/Image      ┌────────────────────────┐
+                                              ├─ message_filters ApproxTime ──▶ │  orbslam3_stereo_node  │
+   /carla/ego_vehicle/imu ─────────────────── ┘  200 Hz  sensor_msgs/Imu        │  buffer IMU, then      │
+                                                  (buffered between frames)      │  SLAM.TrackStereo(     │
+                                                                                 │    imLeft, imRight,    │
+                                                                                 │    t, vImuMeas)        │
+                                                                                 └───────────┬────────────┘
+                                                                    publishes                │
+                                                       /orbslam3/pose        geometry_msgs/PoseStamped
+                                                       /orbslam3/odometry    nav_msgs/Odometry
+                                                       /orbslam3/map_points  sensor_msgs/PointCloud2
+                                                       /orbslam3/keyframes   visualization_msgs/MarkerArray
+                                                       /tf                   world → body (camera)
+
+   /carla/ego_vehicle/gnss     ─ ✗ NOT subscribed — ORB-SLAM3 has no global-sensor input (§3, §5.4)
+   /carla/ego_vehicle/odometry ─ ground truth only → APE evaluator; never enters the SLAM node (§3)
+
+ ── PATH B · offline bag-reader (recommended, deterministic, ~10× faster) ─────────────────────────────
+
+   rosbag2 ──SequentialReader──▶ every msg in header.stamp order ──▶ SLAM.TrackStereo(imL, imR, t, vImu) ──▶ trajectory CSV
+                                     NO ROS 2 topics — messages handed straight into the ORB-SLAM3 API
+```
+
+Three things about this graph are ORB-SLAM3-specific and worth stating explicitly:
+
+- **`/carla/ego_vehicle/gnss` has no consumer.** Unlike VINS-Fusion's `global_fusion` stage, ORB-SLAM3
+  takes no global input — the `*+gps` variants of main README §4.5 have no counterpart here (§3), and
+  drift is bounded by loop closure instead (§5.4).
+- **The stereo pair must be time-synchronised before the call.** `TrackStereo` takes one timestamp for
+  both images, so a `message_filters` `ApproximateTime` (or exact) sync is required; the 200 Hz IMU is
+  buffered and the samples falling between consecutive frames are passed as `vImuMeas`.
+- **The map-side outputs (`/orbslam3/map_points`, `/orbslam3/keyframes`) are new topics** with no
+  VINS-Fusion analogue — they expose the persistent Atlas, and the Atlas map count / merge count that
+  §5.5 argues must be logged alongside APE come from here, not from any single pose topic.
 
 ---
 
