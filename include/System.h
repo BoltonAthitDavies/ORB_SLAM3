@@ -173,6 +173,10 @@ public:
 
     // Information from most recent processed frame
     // You can call this right after TrackMonocular (or stereo or RGBD)
+    // Added for orbslam3_ros2: reach the tracker to read the estimated
+    // IMU velocity (Frame::GetVelocity), which System otherwise hides.
+    Tracking* GetTracker() { return mpTracker; }
+
     int GetTrackingState();
     std::vector<MapPoint*> GetTrackedMapPoints();
     std::vector<cv::KeyPoint> GetTrackedKeyPointsUn();
