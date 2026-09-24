@@ -18,6 +18,7 @@
 
 
 #include "LoopClosing.h"
+#include <iomanip>
 
 #include "Sim3Solver.h"
 #include "Converter.h"
@@ -86,6 +87,40 @@ void LoopClosing::SetLocalMapper(LocalMapping *pLocalMapper)
     mpLocalMapper=pLocalMapper;
 }
 
+void LoopClosing::ConfigureEvaluationLogging(const string &output_path)
+{
+    if(output_path.empty())
+        return;
+    unique_lock<mutex> lock(mMutexEvaluationLog);
+    mEvaluationLog.open(output_path + "/loop_closing.csv", ios::out | ios::trunc);
+    if(!mEvaluationLog)
+    {
+        cerr << "Could not open loop_closing.csv in " << output_path << endl;
+        return;
+    }
+    mEvaluationLog << "event,current_timestamp_ns,current_keyframe_id,matched_timestamp_ns,"
+                      "matched_keyframe_id,duration_ms,correction_translation_m,"
+                      "correction_rotation_deg,correction_scale,status\n";
+    mEvaluationLog.flush();
+}
+
+void LoopClosing::LogEvaluationEvent(const string &event, double current_time,
+                                     long int current_kf, double matched_time,
+                                     long int matched_kf, double duration_ms,
+                                     double correction_translation_m,
+                                     double correction_rotation_deg,
+                                     double correction_scale, const string &status)
+{
+    unique_lock<mutex> lock(mMutexEvaluationLog);
+    if(!mEvaluationLog)
+        return;
+    mEvaluationLog << event << ',' << fixed << setprecision(0) << current_time * 1e9 << ','
+                   << current_kf << ',' << matched_time * 1e9 << ',' << matched_kf << ','
+                   << setprecision(6) << duration_ms << ',' << correction_translation_m << ','
+                   << correction_rotation_deg << ',' << correction_scale << ',' << status << '\n';
+    mEvaluationLog.flush();
+}
+
 
 void LoopClosing::Run()
 {
@@ -100,6 +135,7 @@ void LoopClosing::Run()
 
         if(CheckNewKeyFrames())
         {
+            const auto evaluation_pr_start = std::chrono::steady_clock::now();
             if(mpLastCurrentKF)
             {
                 mpLastCurrentKF->mvpLoopCandKFs.clear();
@@ -110,6 +146,14 @@ void LoopClosing::Run()
 #endif
 
             bool bFindedRegion = NewDetectCommonRegions();
+            ++mnEvaluationPRChecks;
+            const double evaluation_pr_ms = std::chrono::duration<double,std::milli>(
+                std::chrono::steady_clock::now() - evaluation_pr_start).count();
+            LogEvaluationEvent(
+                "place_recognition", mpCurrentKF ? mpCurrentKF->mTimeStamp : 0.0,
+                mpCurrentKF ? static_cast<long int>(mpCurrentKF->mnId) : -1, 0.0, -1,
+                evaluation_pr_ms, 0.0, 0.0, 1.0,
+                bFindedRegion ? (mbMergeDetected ? "merge_candidate" : "loop_candidate") : "no_candidate");
 
 #ifdef REGISTER_TIMES
             std::chrono::steady_clock::time_point time_EndPR = std::chrono::steady_clock::now();
@@ -125,6 +169,9 @@ void LoopClosing::Run()
                         (!mpCurrentKF->GetMap()->isImuInitialized()))
                     {
                         cout << "IMU is not initilized, merge is aborted" << endl;
+                        LogEvaluationEvent("map_merge", mpCurrentKF->mTimeStamp, mpCurrentKF->mnId,
+                                           mpMergeMatchedKF->mTimeStamp, mpMergeMatchedKF->mnId,
+                                           0.0, 0.0, 0.0, 1.0, "rejected_imu_not_initialized");
                     }
                     else
                     {
@@ -142,6 +189,9 @@ void LoopClosing::Run()
                         {
                             cout << "Merge check transformation with IMU" << endl;
                             if(mSold_new.scale()<0.90||mSold_new.scale()>1.1){
+                                LogEvaluationEvent("map_merge", mpCurrentKF->mTimeStamp, mpCurrentKF->mnId,
+                                                   mpMergeMatchedKF->mTimeStamp, mpMergeMatchedKF->mnId,
+                                                   0.0, 0.0, 0.0, mSold_new.scale(), "rejected_scale");
                                 mpMergeLastCurrentKF->SetErase();
                                 mpMergeMatchedKF->SetErase();
                                 mnMergeNumCoincidences = 0;
@@ -171,6 +221,9 @@ void LoopClosing::Run()
 
                         Verbose::PrintMess("*Merge detected", Verbose::VERBOSITY_QUIET);
 
+                        const Sophus::SE3f evaluation_pose_before = mpCurrentKF->GetPose();
+                        const auto evaluation_merge_start = std::chrono::steady_clock::now();
+
 #ifdef REGISTER_TIMES
                         std::chrono::steady_clock::time_point time_StartMerge = std::chrono::steady_clock::now();
 
@@ -181,6 +234,16 @@ void LoopClosing::Run()
                             MergeLocal2();
                         else
                             MergeLocal();
+
+                        const double evaluation_merge_ms = std::chrono::duration<double,std::milli>(
+                            std::chrono::steady_clock::now() - evaluation_merge_start).count();
+                        const Sophus::SE3f evaluation_delta = mpCurrentKF->GetPose() * evaluation_pose_before.inverse();
+                        ++mnEvaluationMerges;
+                        LogEvaluationEvent("map_merge", mpCurrentKF->mTimeStamp, mpCurrentKF->mnId,
+                                           mpMergeMatchedKF->mTimeStamp, mpMergeMatchedKF->mnId,
+                                           evaluation_merge_ms, evaluation_delta.translation().norm(),
+                                           evaluation_delta.so3().log().norm() * 180.0 / M_PI,
+                                           mSold_new.scale(), "accepted");
 
 #ifdef REGISTER_TIMES
                         std::chrono::steady_clock::time_point time_EndMerge = std::chrono::steady_clock::now();
@@ -257,6 +320,9 @@ void LoopClosing::Run()
                         {
                             cout << "BAD LOOP!!!" << endl;
                             bGoodLoop = false;
+                            LogEvaluationEvent("loop_closure", mpCurrentKF->mTimeStamp, mpCurrentKF->mnId,
+                                               mpLoopMatchedKF->mTimeStamp, mpLoopMatchedKF->mnId,
+                                               0.0, 0.0, 0.0, 1.0, "rejected_inertial_geometry");
                         }
 
                     }
@@ -265,6 +331,9 @@ void LoopClosing::Run()
 
                         mvpLoopMapPoints = mvpLoopMPs;
 
+                        const Sophus::SE3f evaluation_pose_before = mpCurrentKF->GetPose();
+                        const auto evaluation_loop_start = std::chrono::steady_clock::now();
+
 #ifdef REGISTER_TIMES
                         std::chrono::steady_clock::time_point time_StartLoop = std::chrono::steady_clock::now();
 
@@ -272,6 +341,15 @@ void LoopClosing::Run()
 
 #endif
                         CorrectLoop();
+                        const double evaluation_loop_ms = std::chrono::duration<double,std::milli>(
+                            std::chrono::steady_clock::now() - evaluation_loop_start).count();
+                        const Sophus::SE3f evaluation_delta = mpCurrentKF->GetPose() * evaluation_pose_before.inverse();
+                        ++mnEvaluationLoops;
+                        LogEvaluationEvent("loop_closure", mpCurrentKF->mTimeStamp, mpCurrentKF->mnId,
+                                           mpLoopMatchedKF->mTimeStamp, mpLoopMatchedKF->mnId,
+                                           evaluation_loop_ms, evaluation_delta.translation().norm(),
+                                           evaluation_delta.so3().log().norm() * 180.0 / M_PI,
+                                           1.0, "accepted");
 #ifdef REGISTER_TIMES
                         std::chrono::steady_clock::time_point time_EndLoop = std::chrono::steady_clock::now();
 
@@ -2268,6 +2346,8 @@ void LoopClosing::ResetIfRequested()
 void LoopClosing::RunGlobalBundleAdjustment(Map* pActiveMap, unsigned long nLoopKF)
 {  
     Verbose::PrintMess("Starting Global Bundle Adjustment", Verbose::VERBOSITY_NORMAL);
+    const auto evaluation_gba_start = std::chrono::steady_clock::now();
+    ++mnEvaluationGBAExecutions;
 
 #ifdef REGISTER_TIMES
     std::chrono::steady_clock::time_point time_StartFGBA = std::chrono::steady_clock::now();
@@ -2284,6 +2364,14 @@ void LoopClosing::RunGlobalBundleAdjustment(Map* pActiveMap, unsigned long nLoop
         Optimizer::GlobalBundleAdjustemnt(pActiveMap,10,&mbStopGBA,nLoopKF,false);
     else
         Optimizer::FullInertialBA(pActiveMap,7,false,nLoopKF,&mbStopGBA);
+
+    const double evaluation_optimizer_ms = std::chrono::duration<double,std::milli>(
+        std::chrono::steady_clock::now() - evaluation_gba_start).count();
+    if(mbStopGBA)
+        ++mnEvaluationGBAAborts;
+    LogEvaluationEvent("global_ba_optimization", 0.0, static_cast<long int>(nLoopKF),
+                       0.0, -1, evaluation_optimizer_ms, 0.0, 0.0, 1.0,
+                       mbStopGBA ? "aborted" : "optimized_pending_map_update");
 
 #ifdef REGISTER_TIMES
     std::chrono::steady_clock::time_point time_EndGBA = std::chrono::steady_clock::now();
@@ -2504,6 +2592,12 @@ void LoopClosing::RunGlobalBundleAdjustment(Map* pActiveMap, unsigned long nLoop
 #endif
             Verbose::PrintMess("Map updated!", Verbose::VERBOSITY_NORMAL);
         }
+
+        LogEvaluationEvent("global_ba_complete", 0.0, static_cast<long int>(nLoopKF),
+                           0.0, -1,
+                           std::chrono::duration<double,std::milli>(
+                               std::chrono::steady_clock::now() - evaluation_gba_start).count(),
+                           0.0, 0.0, 1.0, mbStopGBA ? "aborted" : "map_updated");
 
         mbFinishedGBA = true;
         mbRunningGBA = false;

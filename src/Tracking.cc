@@ -33,6 +33,7 @@
 
 #include <mutex>
 #include <chrono>
+#include <iomanip>
 
 
 using namespace std;
@@ -1449,10 +1450,34 @@ bool Tracking::GetStepByStep()
     return bStepByStep;
 }
 
-
-
-Sophus::SE3f Tracking::GrabImageStereo(const cv::Mat &imRectLeft, const cv::Mat &imRectRight, const double &timestamp, string filename)
+void Tracking::ConfigureEvaluationLogging(const string &output_path)
 {
+    if(output_path.empty())
+        return;
+    mEvaluationLog.open(output_path + "/tracking_frontend.csv", ios::out | ios::trunc);
+    if(!mEvaluationLog)
+    {
+        cerr << "Could not open tracking_frontend.csv in " << output_path << endl;
+        return;
+    }
+    mEvaluationLog << "timestamp_ns,frame_id,tracking_state,features,map_matches_inliers,"
+                      "image_preprocessing_feature_stereo_ms,imu_preintegration_ms,"
+                      "pose_prediction_ms,local_map_tracking_ms,keyframe_decision_ms,"
+                      "tracking_total_ms,keyframes_created\n";
+    mEvaluationLog.flush();
+    mbEvaluationLogging = true;
+}
+
+
+
+Sophus::SE3f Tracking::GrabImageStereo(const cv::Mat &imRectLeft, const cv::Mat &imRectRight, const double &timestamp, string filename, const cv::Mat &maskLeft, const cv::Mat &maskRight)
+{
+    const auto evaluation_start = std::chrono::steady_clock::now();
+    mEvalImuPreintegrationMs = 0.0;
+    mEvalPosePredictionMs = 0.0;
+    mEvalLocalMapTrackingMs = 0.0;
+    mEvalKeyframeDecisionMs = 0.0;
+    const long unsigned int keyframes_before = KeyFrame::nNextId;
     //cout << "GrabImageStereo" << endl;
 
     mImGray = imRectLeft;
@@ -1490,12 +1515,15 @@ Sophus::SE3f Tracking::GrabImageStereo(const cv::Mat &imRectLeft, const cv::Mat 
 
     //cout << "Incoming frame creation" << endl;
 
+    // Only the pinhole stereo path carries the dynamic masks. The two mpCamera2
+    // (fisheye) branches are left exactly as upstream wrote them: this rig is
+    // Camera.type "PinHole", so patching them would be untestable code.
     if (mSensor == System::STEREO && !mpCamera2)
-        mCurrentFrame = Frame(mImGray,imGrayRight,timestamp,mpORBextractorLeft,mpORBextractorRight,mpORBVocabulary,mK,mDistCoef,mbf,mThDepth,mpCamera);
+        mCurrentFrame = Frame(mImGray,imGrayRight,timestamp,mpORBextractorLeft,mpORBextractorRight,mpORBVocabulary,mK,mDistCoef,mbf,mThDepth,mpCamera,static_cast<Frame*>(NULL),IMU::Calib(),maskLeft,maskRight);
     else if(mSensor == System::STEREO && mpCamera2)
         mCurrentFrame = Frame(mImGray,imGrayRight,timestamp,mpORBextractorLeft,mpORBextractorRight,mpORBVocabulary,mK,mDistCoef,mbf,mThDepth,mpCamera,mpCamera2,mTlr);
     else if(mSensor == System::IMU_STEREO && !mpCamera2)
-        mCurrentFrame = Frame(mImGray,imGrayRight,timestamp,mpORBextractorLeft,mpORBextractorRight,mpORBVocabulary,mK,mDistCoef,mbf,mThDepth,mpCamera,&mLastFrame,*mpImuCalib);
+        mCurrentFrame = Frame(mImGray,imGrayRight,timestamp,mpORBextractorLeft,mpORBextractorRight,mpORBVocabulary,mK,mDistCoef,mbf,mThDepth,mpCamera,&mLastFrame,*mpImuCalib,maskLeft,maskRight);
     else if(mSensor == System::IMU_STEREO && mpCamera2)
         mCurrentFrame = Frame(mImGray,imGrayRight,timestamp,mpORBextractorLeft,mpORBextractorRight,mpORBVocabulary,mK,mDistCoef,mbf,mThDepth,mpCamera,mpCamera2,mTlr,&mLastFrame,*mpImuCalib);
 
@@ -1503,6 +1531,8 @@ Sophus::SE3f Tracking::GrabImageStereo(const cv::Mat &imRectLeft, const cv::Mat 
 
     mCurrentFrame.mNameFile = filename;
     mCurrentFrame.mnDataset = mnNumDataset;
+    const double evaluation_frontend_ms = std::chrono::duration<double,std::milli>(
+        std::chrono::steady_clock::now() - evaluation_start).count();
 
 #ifdef REGISTER_TIMES
     vdORBExtract_ms.push_back(mCurrentFrame.mTimeORB_Ext);
@@ -1512,6 +1542,20 @@ Sophus::SE3f Tracking::GrabImageStereo(const cv::Mat &imRectLeft, const cv::Mat 
     //cout << "Tracking start" << endl;
     Track();
     //cout << "Tracking end" << endl;
+
+    if(mbEvaluationLogging)
+    {
+        const double total_ms = std::chrono::duration<double,std::milli>(
+            std::chrono::steady_clock::now() - evaluation_start).count();
+        mEvaluationLog << fixed << setprecision(0) << timestamp * 1e9 << ','
+                       << mCurrentFrame.mnId << ',' << mState << ',' << mCurrentFrame.N << ','
+                       << mnMatchesInliers << ',' << setprecision(3)
+                       << evaluation_frontend_ms << ',' << mEvalImuPreintegrationMs << ','
+                       << mEvalPosePredictionMs << ','
+                       << mEvalLocalMapTrackingMs << ',' << mEvalKeyframeDecisionMs << ','
+                       << total_ms << ',' << (KeyFrame::nNextId - keyframes_before) << '\n';
+        mEvaluationLog.flush();
+    }
 
     return mCurrentFrame.GetPose();
 }
@@ -1677,6 +1721,13 @@ void Tracking::PreintegrateIMU()
     const int n = mvImuFromLastFrame.size()-1;
     if(n==0){
         cout << "Empty IMU measurements vector!!!\n";
+        // orbslam3_ros2 patch: mark the frame integrated before bailing out.
+        // Upstream forgets to, unlike the two early-returns above (both call
+        // setIntegrated()). Without it the frame stays un-preintegrated, the
+        // caller reports "Not preintegrated measurement" and then dereferences
+        // a null preintegration -> SIGSEGV. Skipping one frame's preintegration
+        // is the same graceful degradation the sibling branches already do.
+        mCurrentFrame.setIntegrated();
         return;
     }
 
@@ -1805,7 +1856,7 @@ void Tracking::Track()
     if(mpLocalMapper->mbBadImu)
     {
         cout << "TRACK: Reset map because local mapper set the bad imu flag " << endl;
-        mpSystem->ResetActiveMap();
+        mpSystem->ResetActiveMap("local_mapping_bad_imu");
         return;
     }
 
@@ -1837,7 +1888,7 @@ void Tracking::Track()
                     cout << "Timestamp jump detected. State set to LOST. Reseting IMU integration..." << endl;
                     if(!pCurrentMap->GetIniertialBA2())
                     {
-                        mpSystem->ResetActiveMap();
+                        mpSystem->ResetActiveMap("timestamp_jump_before_ba2");
                     }
                     else
                     {
@@ -1847,7 +1898,7 @@ void Tracking::Track()
                 else
                 {
                     cout << "Timestamp jump detected, before IMU initialization. Reseting..." << endl;
-                    mpSystem->ResetActiveMap();
+                    mpSystem->ResetActiveMap("timestamp_jump_before_imu_initialization");
                 }
                 return;
             }
@@ -1868,10 +1919,13 @@ void Tracking::Track()
 
     if ((mSensor == System::IMU_MONOCULAR || mSensor == System::IMU_STEREO || mSensor == System::IMU_RGBD) && !mbCreatedMap)
     {
+        const auto evaluation_start_preimu = std::chrono::steady_clock::now();
 #ifdef REGISTER_TIMES
         std::chrono::steady_clock::time_point time_StartPreIMU = std::chrono::steady_clock::now();
 #endif
         PreintegrateIMU();
+        mEvalImuPreintegrationMs = std::chrono::duration<double,std::milli>(
+            std::chrono::steady_clock::now() - evaluation_start_preimu).count();
 #ifdef REGISTER_TIMES
         std::chrono::steady_clock::time_point time_EndPreIMU = std::chrono::steady_clock::now();
 
@@ -1925,6 +1979,7 @@ void Tracking::Track()
         // System is initialized. Track Frame.
         bool bOK;
 
+        const auto evaluation_start_pose = std::chrono::steady_clock::now();
 #ifdef REGISTER_TIMES
         std::chrono::steady_clock::time_point time_StartPosePred = std::chrono::steady_clock::now();
 #endif
@@ -2018,7 +2073,7 @@ void Tracking::Track()
 
                     if (pCurrentMap->KeyFramesInMap()<10)
                     {
-                        mpSystem->ResetActiveMap();
+                        mpSystem->ResetActiveMap("tracking_lost_small_map");
                         Verbose::PrintMess("Reseting current map...", Verbose::VERBOSITY_NORMAL);
                     }else
                         CreateMapInAtlas();
@@ -2108,6 +2163,10 @@ void Tracking::Track()
         if(!mCurrentFrame.mpReferenceKF)
             mCurrentFrame.mpReferenceKF = mpReferenceKF;
 
+        mEvalPosePredictionMs = std::chrono::duration<double,std::milli>(
+            std::chrono::steady_clock::now() - evaluation_start_pose).count();
+
+        const auto evaluation_start_local_map = std::chrono::steady_clock::now();
 #ifdef REGISTER_TIMES
         std::chrono::steady_clock::time_point time_EndPosePred = std::chrono::steady_clock::now();
 
@@ -2149,7 +2208,7 @@ void Tracking::Track()
                 if(!pCurrentMap->isImuInitialized() || !pCurrentMap->GetIniertialBA2())
                 {
                     cout << "IMU is not or recently initialized. Reseting active map..." << endl;
-                    mpSystem->ResetActiveMap();
+                    mpSystem->ResetActiveMap("tracking_lost_before_inertial_ba2");
                 }
 
                 mState=RECENTLY_LOST;
@@ -2162,6 +2221,9 @@ void Tracking::Track()
                 mTimeStampLost = mCurrentFrame.mTimeStamp;
             //}
         }
+
+        mEvalLocalMapTrackingMs = std::chrono::duration<double,std::milli>(
+            std::chrono::steady_clock::now() - evaluation_start_local_map).count();
 
         // Save frame if recent relocalization, since they are used for IMU reset (as we are making copy, it shluld be once mCurrFrame is completely modified)
         if((mCurrentFrame.mnId<(mnLastRelocFrameId+mnFramesToResetIMU)) && (mCurrentFrame.mnId > mnFramesToResetIMU) &&
@@ -2241,6 +2303,7 @@ void Tracking::Track()
 #ifdef REGISTER_TIMES
             std::chrono::steady_clock::time_point time_StartNewKF = std::chrono::steady_clock::now();
 #endif
+            const auto evaluation_start_keyframe = std::chrono::steady_clock::now();
             bool bNeedKF = NeedNewKeyFrame();
 
             // Check if we need to insert a new keyframe
@@ -2248,6 +2311,9 @@ void Tracking::Track()
             if(bNeedKF && (bOK || (mInsertKFsLost && mState==RECENTLY_LOST &&
                                    (mSensor == System::IMU_MONOCULAR || mSensor == System::IMU_STEREO || mSensor == System::IMU_RGBD))))
                 CreateNewKeyFrame();
+
+            mEvalKeyframeDecisionMs = std::chrono::duration<double,std::milli>(
+                std::chrono::steady_clock::now() - evaluation_start_keyframe).count();
 
 #ifdef REGISTER_TIMES
             std::chrono::steady_clock::time_point time_EndNewKF = std::chrono::steady_clock::now();
@@ -2272,14 +2338,14 @@ void Tracking::Track()
         {
             if(pCurrentMap->KeyFramesInMap()<=10)
             {
-                mpSystem->ResetActiveMap();
+                mpSystem->ResetActiveMap("tracking_lost_small_map");
                 return;
             }
             if (mSensor == System::IMU_MONOCULAR || mSensor == System::IMU_STEREO || mSensor == System::IMU_RGBD)
                 if (!pCurrentMap->isImuInitialized())
                 {
                     Verbose::PrintMess("Track lost before IMU initialisation, reseting...", Verbose::VERBOSITY_QUIET);
-                    mpSystem->ResetActiveMap();
+                    mpSystem->ResetActiveMap("tracking_lost_before_imu_initialization");
                     return;
                 }
 
@@ -2589,7 +2655,7 @@ void Tracking::CreateInitialMapMonocular()
     if(medianDepth<0 || pKFcur->TrackedMapPoints(1)<50) // TODO Check, originally 100 tracks
     {
         Verbose::PrintMess("Wrong initialization, reseting...", Verbose::VERBOSITY_QUIET);
-        mpSystem->ResetActiveMap();
+        mpSystem->ResetActiveMap("wrong_monocular_initialization");
         return;
     }
 

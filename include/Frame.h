@@ -59,7 +59,9 @@ public:
     Frame(const Frame &frame);
 
     // Constructor for stereo cameras.
-    Frame(const cv::Mat &imLeft, const cv::Mat &imRight, const double &timeStamp, ORBextractor* extractorLeft, ORBextractor* extractorRight, ORBVocabulary* voc, cv::Mat &K, cv::Mat &distCoef, const float &bf, const float &thDepth, GeometricCamera* pCamera,Frame* pPrevF = static_cast<Frame*>(NULL), const IMU::Calib &ImuCalib = IMU::Calib());
+    // maskLeft/maskRight: optional CV_8UC1 dynamic-object masks, 255 = keep, 0 = dynamic,
+    // same size as the corresponding image. Empty (the default) disables masking.
+    Frame(const cv::Mat &imLeft, const cv::Mat &imRight, const double &timeStamp, ORBextractor* extractorLeft, ORBextractor* extractorRight, ORBVocabulary* voc, cv::Mat &K, cv::Mat &distCoef, const float &bf, const float &thDepth, GeometricCamera* pCamera,Frame* pPrevF = static_cast<Frame*>(NULL), const IMU::Calib &ImuCalib = IMU::Calib(), const cv::Mat &maskLeft = cv::Mat(), const cv::Mat &maskRight = cv::Mat());
 
     // Constructor for RGB-D cameras.
     Frame(const cv::Mat &imGray, const cv::Mat &imDepth, const double &timeStamp, ORBextractor* extractor,ORBVocabulary* voc, cv::Mat &K, cv::Mat &distCoef, const float &bf, const float &thDepth, GeometricCamera* pCamera,Frame* pPrevF = static_cast<Frame*>(NULL), const IMU::Calib &ImuCalib = IMU::Calib());
@@ -71,7 +73,9 @@ public:
     // ~Frame();
 
     // Extract ORB on the image. 0 for left image and 1 for right image.
-    void ExtractORB(int flag, const cv::Mat &im, const int x0, const int x1);
+    // `mask` is forwarded to ORBextractor's long-declared but previously ignored
+    // _mask argument. Empty = extract everywhere, i.e. stock behaviour.
+    void ExtractORB(int flag, const cv::Mat &im, const int x0, const int x1, const cv::Mat &mask = cv::Mat());
 
     // Compute Bag of Words representation.
     void ComputeBoW();

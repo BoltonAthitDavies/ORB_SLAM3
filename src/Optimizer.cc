@@ -1225,6 +1225,7 @@ void Optimizer::LocalBundleAdjustment(KeyFrame *pKF, bool* pbStopFlag, Map* pMap
         pCurrentMap->msOptKFs.insert(pKFi->mnId);
     }
     num_OptKF = lLocalKeyFrames.size();
+    num_MPs = lLocalMapPoints.size();
 
     // Set Fixed KeyFrame vertices
     for(list<KeyFrame*>::iterator lit=lFixedCameras.begin(), lend=lFixedCameras.end(); lit!=lend; lit++)
@@ -2836,6 +2837,14 @@ void Optimizer::LocalInertialBA(KeyFrame *pKF, bool *pbStopFlag, Map *pMap, int&
     {
         assert(mit->second>=3);
     }
+
+    // Export the actual inertial-LBA problem size through the existing
+    // instrumentation reference arguments. Upstream accepted these arguments
+    // but never assigned them in LocalInertialBA, leaving every logged value 0.
+    num_OptKF = vpOptimizableKFs.size() + lpOptVisKFs.size();
+    num_fixedKF = lFixedKeyFrames.size();
+    num_MPs = lLocalMapPoints.size();
+    num_edges = optimizer.edges().size();
 
     optimizer.initializeOptimization();
     optimizer.computeActiveErrors();

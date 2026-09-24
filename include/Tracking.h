@@ -40,6 +40,7 @@
 #include "GeometricCamera.h"
 
 #include <mutex>
+#include <fstream>
 #include <unordered_set>
 
 namespace ORB_SLAM3
@@ -69,7 +70,9 @@ public:
     bool ParseIMUParamFile(cv::FileStorage &fSettings);
 
     // Preprocess the input and call Track(). Extract features and performs stereo matching.
-    Sophus::SE3f GrabImageStereo(const cv::Mat &imRectLeft,const cv::Mat &imRectRight, const double &timestamp, string filename);
+    // maskLeft/maskRight: optional CV_8UC1 dynamic-object masks, 255 = keep, 0 = dynamic.
+    // Empty (the default) disables masking. See System::TrackStereo.
+    Sophus::SE3f GrabImageStereo(const cv::Mat &imRectLeft,const cv::Mat &imRectRight, const double &timestamp, string filename, const cv::Mat &maskLeft = cv::Mat(), const cv::Mat &maskRight = cv::Mat());
     Sophus::SE3f GrabImageRGBD(const cv::Mat &imRGB,const cv::Mat &imD, const double &timestamp, string filename);
     Sophus::SE3f GrabImageMonocular(const cv::Mat &im, const double &timestamp, string filename);
 
@@ -176,6 +179,8 @@ public:
 
     bool mbWriteStats;
 
+    void ConfigureEvaluationLogging(const string &output_path);
+
 #ifdef REGISTER_TIMES
     void LocalMapStats2File();
     void TrackStats2File();
@@ -230,6 +235,13 @@ protected:
     void ResetFrameIMU();
 
     bool mbMapUpdated;
+
+    std::ofstream mEvaluationLog;
+    bool mbEvaluationLogging = false;
+    double mEvalImuPreintegrationMs = 0.0;
+    double mEvalPosePredictionMs = 0.0;
+    double mEvalLocalMapTrackingMs = 0.0;
+    double mEvalKeyframeDecisionMs = 0.0;
 
     // Imu preintegration from last frame
     IMU::Preintegrated *mpImuPreintegratedFromLastKF;

@@ -31,6 +31,8 @@
 #include <boost/algorithm/string.hpp>
 #include <thread>
 #include <mutex>
+#include <atomic>
+#include <fstream>
 #include "Thirdparty/g2o/g2o/types/types_seven_dof_expmap.h"
 
 namespace ORB_SLAM3
@@ -81,6 +83,13 @@ public:
     void RequestFinish();
 
     bool isFinished();
+
+    void ConfigureEvaluationLogging(const string &output_path);
+    long unsigned int EvaluationPlaceRecognitionChecks() const { return mnEvaluationPRChecks.load(); }
+    long unsigned int EvaluationLoopClosures() const { return mnEvaluationLoops.load(); }
+    long unsigned int EvaluationMapMerges() const { return mnEvaluationMerges.load(); }
+    long unsigned int EvaluationGBAExecutions() const { return mnEvaluationGBAExecutions.load(); }
+    long unsigned int EvaluationGBAAborts() const { return mnEvaluationGBAAborts.load(); }
 
     Viewer* mpViewer;
 
@@ -239,6 +248,20 @@ protected:
 
     // To (de)activate LC
     bool mbActiveLC = true;
+
+    void LogEvaluationEvent(const string &event, double current_time,
+                            long int current_kf, double matched_time,
+                            long int matched_kf, double duration_ms,
+                            double correction_translation_m,
+                            double correction_rotation_deg,
+                            double correction_scale, const string &status);
+    std::ofstream mEvaluationLog;
+    std::mutex mMutexEvaluationLog;
+    std::atomic<long unsigned int> mnEvaluationPRChecks{0};
+    std::atomic<long unsigned int> mnEvaluationLoops{0};
+    std::atomic<long unsigned int> mnEvaluationMerges{0};
+    std::atomic<long unsigned int> mnEvaluationGBAExecutions{0};
+    std::atomic<long unsigned int> mnEvaluationGBAAborts{0};
 
 #ifdef REGISTER_LOOP
     string mstrFolderLoop;

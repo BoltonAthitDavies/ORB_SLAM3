@@ -241,7 +241,7 @@ System::System(const string &strVocFile, const string &strSettingsFile, const eS
 
 }
 
-Sophus::SE3f System::TrackStereo(const cv::Mat &imLeft, const cv::Mat &imRight, const double &timestamp, const vector<IMU::Point>& vImuMeas, string filename)
+Sophus::SE3f System::TrackStereo(const cv::Mat &imLeft, const cv::Mat &imRight, const double &timestamp, const vector<IMU::Point>& vImuMeas, string filename, const cv::Mat &maskLeft, const cv::Mat &maskRight)
 {
     if(mSensor!=STEREO && mSensor!=IMU_STEREO)
     {
@@ -249,7 +249,11 @@ Sophus::SE3f System::TrackStereo(const cv::Mat &imLeft, const cv::Mat &imRight, 
         exit(-1);
     }
 
-    cv::Mat imLeftToFeed, imRightToFeed;
+    // Whatever geometric transform is applied to the images MUST be applied to the
+    // dynamic masks too, or the mask silently drifts off the objects it describes.
+    // Nearest-neighbour throughout -- a mask is a label image, not an intensity one,
+    // and interpolating it would invent boundary values between 0 and 255.
+    cv::Mat imLeftToFeed, imRightToFeed, maskLeftToFeed, maskRightToFeed;
     if(settings_ && settings_->needToRectify()){
         cv::Mat M1l = settings_->M1l();
         cv::Mat M2l = settings_->M2l();
@@ -258,14 +262,26 @@ Sophus::SE3f System::TrackStereo(const cv::Mat &imLeft, const cv::Mat &imRight, 
 
         cv::remap(imLeft, imLeftToFeed, M1l, M2l, cv::INTER_LINEAR);
         cv::remap(imRight, imRightToFeed, M1r, M2r, cv::INTER_LINEAR);
+        // Border 255 == "static": pixels rectified in from outside the source image
+        // carry no detection evidence, so they must not be treated as dynamic.
+        if(!maskLeft.empty())
+            cv::remap(maskLeft, maskLeftToFeed, M1l, M2l, cv::INTER_NEAREST, cv::BORDER_CONSTANT, cv::Scalar(255));
+        if(!maskRight.empty())
+            cv::remap(maskRight, maskRightToFeed, M1r, M2r, cv::INTER_NEAREST, cv::BORDER_CONSTANT, cv::Scalar(255));
     }
     else if(settings_ && settings_->needToResize()){
         cv::resize(imLeft,imLeftToFeed,settings_->newImSize());
         cv::resize(imRight,imRightToFeed,settings_->newImSize());
+        if(!maskLeft.empty())
+            cv::resize(maskLeft,maskLeftToFeed,settings_->newImSize(),0,0,cv::INTER_NEAREST);
+        if(!maskRight.empty())
+            cv::resize(maskRight,maskRightToFeed,settings_->newImSize(),0,0,cv::INTER_NEAREST);
     }
     else{
         imLeftToFeed = imLeft.clone();
         imRightToFeed = imRight.clone();
+        maskLeftToFeed = maskLeft;
+        maskRightToFeed = maskRight;
     }
 
     // Check mode change
@@ -313,7 +329,7 @@ Sophus::SE3f System::TrackStereo(const cv::Mat &imLeft, const cv::Mat &imRight, 
             mpTracker->GrabImuData(vImuMeas[i_imu]);
 
     // std::cout << "start GrabImageStereo" << std::endl;
-    Sophus::SE3f Tcw = mpTracker->GrabImageStereo(imLeftToFeed,imRightToFeed,timestamp,filename);
+    Sophus::SE3f Tcw = mpTracker->GrabImageStereo(imLeftToFeed,imRightToFeed,timestamp,filename,maskLeftToFeed,maskRightToFeed);
 
     // std::cout << "out grabber" << std::endl;
 
@@ -506,10 +522,91 @@ void System::Reset()
     mbReset = true;
 }
 
-void System::ResetActiveMap()
+void System::ResetActiveMap(const string &reason)
 {
     unique_lock<mutex> lock(mMutexReset);
     mbResetActiveMap = true;
+    ++mnActiveMapResetRequests;
+    {
+        unique_lock<mutex> evaluation_lock(mMutexEvaluation);
+        mLastResetReason = reason;
+    }
+}
+
+void System::ConfigureEvaluationLogging(const string &output_path)
+{
+    if(output_path.empty())
+        return;
+    mpTracker->ConfigureEvaluationLogging(output_path);
+    mpLocalMapper->ConfigureEvaluationLogging(output_path);
+    mpLoopCloser->ConfigureEvaluationLogging(output_path);
+}
+
+System::EvaluationState System::GetEvaluationState()
+{
+    EvaluationState state;
+    Map* map = mpAtlas->GetCurrentMap();
+    state.maps = mpAtlas->CountMaps();
+    state.keyframes_created = KeyFrame::nNextId;
+    if(map)
+    {
+        state.map_id = map->GetId();
+        state.keyframes_in_map = map->KeyFramesInMap();
+        state.map_points_in_map = map->MapPointsInMap();
+        state.map_change_index = map->GetMapChangeIndex();
+        state.imu_initialized = map->isImuInitialized();
+        state.inertial_ba1 = map->GetIniertialBA1();
+        state.inertial_ba2 = map->GetIniertialBA2();
+    }
+    state.local_mapping_queue = mpLocalMapper->KeyframesInQueue();
+    state.local_mapping_initializing = mpLocalMapper->IsInitializing();
+    state.local_mapping_accepting_keyframes = mpLocalMapper->AcceptKeyFrames();
+    state.local_mapping_keyframes = mpLocalMapper->EvaluationKeyframes();
+    state.local_ba_executions = mpLocalMapper->EvaluationLBAExecutions();
+    state.local_ba_aborts = mpLocalMapper->EvaluationLBAAborts();
+    state.global_ba_running = mpLoopCloser->isRunningGBA();
+    state.place_recognition_checks = mpLoopCloser->EvaluationPlaceRecognitionChecks();
+    state.loop_closures = mpLoopCloser->EvaluationLoopClosures();
+    state.map_merges = mpLoopCloser->EvaluationMapMerges();
+    state.global_ba_executions = mpLoopCloser->EvaluationGBAExecutions();
+    state.global_ba_aborts = mpLoopCloser->EvaluationGBAAborts();
+    state.active_map_reset_requests = mnActiveMapResetRequests.load();
+    state.frame_features = mpTracker->mCurrentFrame.N;
+    state.map_matches_inliers = mpTracker->GetMatchesInliers();
+    {
+        unique_lock<mutex> evaluation_lock(mMutexEvaluation);
+        state.last_reset_reason = mLastResetReason;
+    }
+    return state;
+}
+
+void System::SaveEvaluationTrajectories(const string &output_path)
+{
+    if(output_path.empty())
+        return;
+
+    // SaveTrajectoryEuRoC assumes at least one keyframe exists and dereferences
+    // the selected map immediately. A run that never initializes is still a
+    // valid (failed) experiment, so represent it with empty trajectory files
+    // instead of crashing during shutdown and losing the summary logs.
+    bool has_keyframes = false;
+    for(Map* map : mpAtlas->GetAllMaps())
+    {
+        if(map && !map->GetAllKeyFrames().empty())
+        {
+            has_keyframes = true;
+            break;
+        }
+    }
+    if(!has_keyframes)
+    {
+        ofstream(output_path + "/final_frame_trajectory.txt").close();
+        ofstream(output_path + "/final_keyframe_trajectory.txt").close();
+        cerr << "No keyframes: wrote empty final evaluation trajectories" << endl;
+        return;
+    }
+    SaveTrajectoryEuRoC(output_path + "/final_frame_trajectory.txt");
+    SaveKeyFrameTrajectoryEuRoC(output_path + "/final_keyframe_trajectory.txt");
 }
 
 void System::Shutdown()
@@ -530,20 +627,19 @@ void System::Shutdown()
             usleep(5000);
     }*/
 
-    // Wait until all thread have effectively stopped
-    /*while(!mpLocalMapper->isFinished() || !mpLoopCloser->isFinished() || mpLoopCloser->isRunningGBA())
+    // Wait until all estimator threads have stopped before exporting final
+    // trajectories. Otherwise a loop correction or GBA can revise the map while
+    // it is being serialized, producing a scientifically invalid hybrid result.
+    while(!mpLocalMapper->isFinished() || !mpLoopCloser->isFinished() || mpLoopCloser->isRunningGBA())
     {
         if(!mpLocalMapper->isFinished())
-            cout << "mpLocalMapper is not finished" << endl;*/
-        /*if(!mpLoopCloser->isFinished())
-            cout << "mpLoopCloser is not finished" << endl;
-        if(mpLoopCloser->isRunningGBA()){
-            cout << "mpLoopCloser is running GBA" << endl;
-            cout << "break anyway..." << endl;
-            break;
-        }*/
-        /*usleep(5000);
-    }*/
+            usleep(5000);
+        if(!mpLoopCloser->isFinished())
+            usleep(5000);
+        if(mpLoopCloser->isRunningGBA())
+            usleep(5000);
+        usleep(5000);
+    }
 
     if(!mStrSaveAtlasToFile.empty())
     {
@@ -671,7 +767,7 @@ void System::SaveTrajectoryEuRoC(const string &filename)
 
     vector<Map*> vpMaps = mpAtlas->GetAllMaps();
     int numMaxKFs = 0;
-    Map* pBiggerMap;
+    Map* pBiggerMap = nullptr;
     std::cout << "There are " << std::to_string(vpMaps.size()) << " maps in the atlas" << std::endl;
     for(Map* pMap :vpMaps)
     {
@@ -681,6 +777,13 @@ void System::SaveTrajectoryEuRoC(const string &filename)
             numMaxKFs = pMap->GetAllKeyFrames().size();
             pBiggerMap = pMap;
         }
+    }
+
+    if(!pBiggerMap)
+    {
+        ofstream(filename.c_str()).close();
+        cerr << "No keyframes: wrote an empty trajectory to " << filename << endl;
+        return;
     }
 
     vector<KeyFrame*> vpKFs = pBiggerMap->GetAllKeyFrames();
@@ -892,7 +995,7 @@ void System::SaveTrajectoryEuRoC(const string &filename, Map* pMap)
     }
 
     vector<Map*> vpMaps = mpAtlas->GetAllMaps();
-    Map* pBiggerMap;
+    Map* pBiggerMap = nullptr;
     int numMaxKFs = 0;
     for(Map* pMap :vpMaps)
     {
@@ -1059,7 +1162,7 @@ void System::SaveKeyFrameTrajectoryEuRoC(const string &filename)
     cout << endl << "Saving keyframe trajectory to " << filename << " ..." << endl;
 
     vector<Map*> vpMaps = mpAtlas->GetAllMaps();
-    Map* pBiggerMap;
+    Map* pBiggerMap = nullptr;
     int numMaxKFs = 0;
     for(Map* pMap :vpMaps)
     {
@@ -1546,4 +1649,3 @@ string System::CalculateCheckSum(string filename, int type)
 }
 
 } //namespace ORB_SLAM
-

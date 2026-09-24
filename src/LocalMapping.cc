@@ -19,6 +19,7 @@
 
 #include "LocalMapping.h"
 #include "LoopClosing.h"
+#include <iomanip>
 #include "ORBmatcher.h"
 #include "Optimizer.h"
 #include "Converter.h"
@@ -61,6 +62,26 @@ void LocalMapping::SetTracker(Tracking *pTracker)
     mpTracker=pTracker;
 }
 
+void LocalMapping::ConfigureEvaluationLogging(const string &output_path)
+{
+    if(output_path.empty())
+        return;
+    mEvaluationLog.open(output_path + "/local_mapping.csv", ios::out | ios::trunc);
+    if(!mEvaluationLog)
+    {
+        cerr << "Could not open local_mapping.csv in " << output_path << endl;
+        return;
+    }
+    mEvaluationLog << "timestamp_ns,keyframe_id,map_id,keyframe_insertion_ms,"
+                      "map_point_culling_ms,map_point_creation_fusion_ms,local_ba_ms,"
+                      "imu_initialization_ms,keyframe_culling_ms,inertial_refinement_ms,"
+                      "total_ms,lba_executed,lba_aborted,"
+                      "optimized_keyframes,fixed_keyframes,ba_map_points,ba_edges,"
+                      "keyframes_in_map,map_points_in_map,queue_after,imu_initialized,"
+                      "inertial_ba1,inertial_ba2,reset_requested,reset_reason\n";
+    mEvaluationLog.flush();
+}
+
 void LocalMapping::Run()
 {
     mbFinished = false;
@@ -73,6 +94,14 @@ void LocalMapping::Run()
         // Check if there are keyframes in the queue
         if(CheckNewKeyFrames() && !mbBadImu)
         {
+            const auto evaluation_start = std::chrono::steady_clock::now();
+            bool evaluation_reset_requested = false;
+            string evaluation_reset_reason = "none";
+            double evaluation_lba_ms = 0.0;
+            double evaluation_imu_initialization_ms = 0.0;
+            double evaluation_kf_culling_ms = 0.0;
+            double evaluation_inertial_refinement_ms = 0.0;
+            bool evaluation_lba_aborted = false;
 #ifdef REGISTER_TIMES
             double timeLBA_ms = 0;
             double timeKFCulling_ms = 0;
@@ -81,6 +110,7 @@ void LocalMapping::Run()
 #endif
             // BoW conversion and insertion in Map
             ProcessNewKeyFrame();
+            const auto evaluation_after_insert = std::chrono::steady_clock::now();
 #ifdef REGISTER_TIMES
             std::chrono::steady_clock::time_point time_EndProcessKF = std::chrono::steady_clock::now();
 
@@ -90,6 +120,7 @@ void LocalMapping::Run()
 
             // Check recent MapPoints
             MapPointCulling();
+            const auto evaluation_after_mp_culling = std::chrono::steady_clock::now();
 #ifdef REGISTER_TIMES
             std::chrono::steady_clock::time_point time_EndMPCulling = std::chrono::steady_clock::now();
 
@@ -107,6 +138,7 @@ void LocalMapping::Run()
                 // Find more matches in neighbor keyframes and fuse point duplications
                 SearchInNeighbors();
             }
+            const auto evaluation_after_mp_creation = std::chrono::steady_clock::now();
 
 #ifdef REGISTER_TIMES
             std::chrono::steady_clock::time_point time_EndMPCreation = std::chrono::steady_clock::now();
@@ -142,6 +174,8 @@ void LocalMapping::Run()
                                 mbResetRequestedActiveMap = true;
                                 mpMapToReset = mpCurrentKeyFrame->GetMap();
                                 mbBadImu = true;
+                                evaluation_reset_requested = true;
+                                evaluation_reset_reason = "insufficient_motion_during_imu_initialization";
                             }
                         }
 
@@ -155,6 +189,16 @@ void LocalMapping::Run()
                         b_doneLBA = true;
                     }
 
+                }
+                const auto evaluation_after_lba = std::chrono::steady_clock::now();
+                evaluation_lba_ms = b_doneLBA ? std::chrono::duration<double,std::milli>(
+                    evaluation_after_lba - evaluation_after_mp_creation).count() : 0.0;
+                if(b_doneLBA)
+                {
+                    ++mnEvaluationLBAExecutions;
+                    evaluation_lba_aborted = mbAbortBA;
+                    if(evaluation_lba_aborted)
+                        ++mnEvaluationLBAAborts;
                 }
 #ifdef REGISTER_TIMES
                 std::chrono::steady_clock::time_point time_EndLBA = std::chrono::steady_clock::now();
@@ -177,7 +221,9 @@ void LocalMapping::Run()
 
 #endif
 
-                // Initialize IMU here
+                // Initial inertial alignment is a distinct backend operation;
+                // do not hide its potentially large cost in keyframe culling.
+                const auto evaluation_start_imu_initialization = std::chrono::steady_clock::now();
                 if(!mpCurrentKeyFrame->GetMap()->isImuInitialized() && mbInertial)
                 {
                     if (mbMonocular)
@@ -185,10 +231,16 @@ void LocalMapping::Run()
                     else
                         InitializeIMU(1e2, 1e5, true);
                 }
+                const auto evaluation_after_imu_initialization = std::chrono::steady_clock::now();
+                evaluation_imu_initialization_ms = std::chrono::duration<double,std::milli>(
+                    evaluation_after_imu_initialization - evaluation_start_imu_initialization).count();
 
 
                 // Check redundant local Keyframes
                 KeyFrameCulling();
+                const auto evaluation_after_kf_culling = std::chrono::steady_clock::now();
+                evaluation_kf_culling_ms = std::chrono::duration<double,std::milli>(
+                    evaluation_after_kf_culling - evaluation_after_imu_initialization).count();
 
 #ifdef REGISTER_TIMES
                 std::chrono::steady_clock::time_point time_EndKFCulling = std::chrono::steady_clock::now();
@@ -240,6 +292,8 @@ void LocalMapping::Run()
                         }
                     }
                 }
+                evaluation_inertial_refinement_ms = std::chrono::duration<double,std::milli>(
+                    std::chrono::steady_clock::now() - evaluation_after_kf_culling).count();
             }
 
 #ifdef REGISTER_TIMES
@@ -248,6 +302,30 @@ void LocalMapping::Run()
 #endif
 
             mpLoopCloser->InsertKeyFrame(mpCurrentKeyFrame);
+
+            ++mnEvaluationKeyframes;
+            if(mEvaluationLog)
+            {
+                const auto evaluation_end = std::chrono::steady_clock::now();
+                Map* evaluation_map = mpCurrentKeyFrame->GetMap();
+                mEvaluationLog << fixed << setprecision(0)
+                    << mpCurrentKeyFrame->mTimeStamp * 1e9 << ',' << mpCurrentKeyFrame->mnId
+                    << ',' << evaluation_map->GetId() << ',' << setprecision(3)
+                    << std::chrono::duration<double,std::milli>(evaluation_after_insert - evaluation_start).count() << ','
+                    << std::chrono::duration<double,std::milli>(evaluation_after_mp_culling - evaluation_after_insert).count() << ','
+                    << std::chrono::duration<double,std::milli>(evaluation_after_mp_creation - evaluation_after_mp_culling).count() << ','
+                    << evaluation_lba_ms << ',' << evaluation_imu_initialization_ms << ','
+                    << evaluation_kf_culling_ms << ',' << evaluation_inertial_refinement_ms << ','
+                    << std::chrono::duration<double,std::milli>(evaluation_end - evaluation_start).count() << ','
+                    << (b_doneLBA ? 1 : 0) << ',' << (evaluation_lba_aborted ? 1 : 0) << ','
+                    << num_OptKF_BA << ',' << num_FixedKF_BA << ',' << num_MPs_BA << ',' << num_edges_BA << ','
+                    << evaluation_map->KeyFramesInMap() << ',' << evaluation_map->MapPointsInMap() << ','
+                    << KeyframesInQueue() << ',' << (evaluation_map->isImuInitialized() ? 1 : 0) << ','
+                    << (evaluation_map->GetIniertialBA1() ? 1 : 0) << ','
+                    << (evaluation_map->GetIniertialBA2() ? 1 : 0) << ','
+                    << (evaluation_reset_requested ? 1 : 0) << ',' << evaluation_reset_reason << '\n';
+                mEvaluationLog.flush();
+            }
 
 #ifdef REGISTER_TIMES
             std::chrono::steady_clock::time_point time_EndLocalMap = std::chrono::steady_clock::now();

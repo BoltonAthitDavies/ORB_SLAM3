@@ -28,6 +28,8 @@
 #include "Settings.h"
 
 #include <mutex>
+#include <atomic>
+#include <fstream>
 
 
 namespace ORB_SLAM3
@@ -79,6 +81,11 @@ public:
     bool IsInitializing();
     double GetCurrKFTime();
     KeyFrame* GetCurrKF();
+
+    void ConfigureEvaluationLogging(const string &output_path);
+    long unsigned int EvaluationKeyframes() const { return mnEvaluationKeyframes.load(); }
+    long unsigned int EvaluationLBAExecutions() const { return mnEvaluationLBAExecutions.load(); }
+    long unsigned int EvaluationLBAAborts() const { return mnEvaluationLBAAborts.load(); }
 
     std::mutex mMutexImuInit;
 
@@ -191,6 +198,11 @@ protected:
     float mTinit;
 
     int countRefinement;
+
+    std::ofstream mEvaluationLog;
+    std::atomic<long unsigned int> mnEvaluationKeyframes{0};
+    std::atomic<long unsigned int> mnEvaluationLBAExecutions{0};
+    std::atomic<long unsigned int> mnEvaluationLBAAborts{0};
 
     //DEBUG
     ofstream f_lm;

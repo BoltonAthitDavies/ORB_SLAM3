@@ -53,7 +53,12 @@ public:
 
     // Compute the ORB features and descriptors on an image.
     // ORB are dispersed on the image using an octree.
-    // Mask is ignored in the current implementation.
+    //
+    // _mask is an OPTIONAL dynamic-object mask (RY-SLAM style): CV_8UC1, the same
+    // size as _image, 255 = static/keep, 0 = dynamic. Keypoints on dynamic regions
+    // are dropped BEFORE DistributeOctTree runs, so the octree refills the level's
+    // feature quota from the surviving static keypoints instead of leaving a hole.
+    // An empty Mat disables masking and reproduces stock upstream behaviour exactly.
     int operator()( cv::InputArray _image, cv::InputArray _mask,
                     std::vector<cv::KeyPoint>& _keypoints,
                     cv::OutputArray _descriptors, std::vector<int> &vLappingArea);
@@ -90,6 +95,19 @@ protected:
                                            const int &maxX, const int &minY, const int &maxY, const int &nFeatures, const int &level);
 
     void ComputeKeyPointsOld(std::vector<std::vector<cv::KeyPoint> >& allKeypoints);
+
+    /// Dynamic-object mask for the frame currently being extracted, in LEVEL-0
+    /// pixel coordinates. Set at the top of operator(), consumed by
+    /// ComputeKeyPointsOctTree. Empty means "no filtering".
+    ///
+    /// A plain member is thread-safe here: Frame extracts left and right in two
+    /// threads but through two DISTINCT ORBextractor objects (mpORBextractorLeft
+    /// and mpORBextractorRight), so the two threads never share this field.
+    cv::Mat mMask;
+    /// Latches the "mask does not match the image" complaint so a misconfigured
+    /// run warns once instead of once per frame per pyramid level.
+    bool mbMaskWarned = false;
+
     std::vector<cv::Point> pattern;
 
     int nfeatures;

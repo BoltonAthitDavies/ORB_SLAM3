@@ -26,6 +26,8 @@
 #include<stdlib.h>
 #include<string>
 #include<thread>
+#include<atomic>
+#include<mutex>
 #include<opencv2/core/core.hpp>
 
 #include "Tracking.h"
@@ -83,6 +85,35 @@ class Settings;
 class System
 {
 public:
+    struct EvaluationState
+    {
+        bool imu_initialized = false;
+        bool inertial_ba1 = false;
+        bool inertial_ba2 = false;
+        bool local_mapping_initializing = false;
+        bool local_mapping_accepting_keyframes = false;
+        bool global_ba_running = false;
+        long unsigned int map_id = 0;
+        long unsigned int maps = 0;
+        long unsigned int keyframes_in_map = 0;
+        long unsigned int map_points_in_map = 0;
+        long unsigned int keyframes_created = 0;
+        long unsigned int local_mapping_queue = 0;
+        long unsigned int local_mapping_keyframes = 0;
+        long unsigned int local_ba_executions = 0;
+        long unsigned int local_ba_aborts = 0;
+        long unsigned int place_recognition_checks = 0;
+        long unsigned int loop_closures = 0;
+        long unsigned int map_merges = 0;
+        long unsigned int global_ba_executions = 0;
+        long unsigned int global_ba_aborts = 0;
+        long unsigned int active_map_reset_requests = 0;
+        int map_change_index = 0;
+        int frame_features = 0;
+        int map_matches_inliers = 0;
+        string last_reset_reason;
+    };
+
     // Input sensor
     enum eSensor{
         MONOCULAR=0,
@@ -107,7 +138,13 @@ public:
     // Proccess the given stereo frame. Images must be synchronized and rectified.
     // Input images: RGB (CV_8UC3) or grayscale (CV_8U). RGB is converted to grayscale.
     // Returns the camera pose (empty if tracking fails).
-    Sophus::SE3f TrackStereo(const cv::Mat &imLeft, const cv::Mat &imRight, const double &timestamp, const vector<IMU::Point>& vImuMeas = vector<IMU::Point>(), string filename="");
+    //
+    // maskLeft/maskRight are OPTIONAL dynamic-object masks (RY-SLAM style): CV_8UC1,
+    // same size as the corresponding image, 255 = static/keep, 0 = dynamic. Keypoints
+    // landing on a dynamic region are discarded inside ORBextractor before the octree
+    // distributes the per-level feature quota. An empty Mat (the default) disables
+    // masking entirely and restores stock upstream behaviour exactly.
+    Sophus::SE3f TrackStereo(const cv::Mat &imLeft, const cv::Mat &imRight, const double &timestamp, const vector<IMU::Point>& vImuMeas = vector<IMU::Point>(), string filename="", const cv::Mat &maskLeft = cv::Mat(), const cv::Mat &maskRight = cv::Mat());
 
     // Process the given rgbd frame. Depthmap must be registered to the RGB frame.
     // Input image: RGB (CV_8UC3) or grayscale (CV_8U). RGB is converted to grayscale.
@@ -132,7 +169,11 @@ public:
 
     // Reset the system (clear Atlas or the active map)
     void Reset();
-    void ResetActiveMap();
+    void ResetActiveMap(const string &reason = "unspecified");
+
+    void ConfigureEvaluationLogging(const string &output_path);
+    EvaluationState GetEvaluationState();
+    void SaveEvaluationTrajectories(const string &output_path);
 
     // All threads will be requested to finish.
     // It waits until all threads have finished.
@@ -244,6 +285,9 @@ private:
     std::mutex mMutexReset;
     bool mbReset;
     bool mbResetActiveMap;
+    std::atomic<long unsigned int> mnActiveMapResetRequests{0};
+    std::mutex mMutexEvaluation;
+    string mLastResetReason{"none"};
 
     // Change mode flags
     std::mutex mMutexMode;

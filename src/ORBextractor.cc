@@ -864,6 +864,46 @@ namespace ORB_SLAM3
                         {
                             (*vit).pt.x+=j*wCell;
                             (*vit).pt.y+=i*hCell;
+
+                            // RY-SLAM dynamic-feature removal, eq.(1). Count dynamic
+                            // pixels in a 3x3 neighbourhood; delete the keypoint at >=5,
+                            // reserve it otherwise. One rule covers both cases the paper
+                            // separates: a keypoint deep inside a dynamic region scores 9
+                            // and goes, one just outside a boundary scores <=4 and stays.
+                            //
+                            // COORDINATES: at this point pt is in LEVEL coordinates
+                            // RELATIVE TO (minBorderX, minBorderY) -- j*wCell/i*hCell have
+                            // been added just above, but minBorderX/Y are only added after
+                            // DistributeOctTree returns. mMask is in level-0 pixels, hence
+                            // the +minBorder then *scale. Getting this wrong misaligns the
+                            // mask silently rather than failing.
+                            //
+                            // The neighbourhood is SPACED BY THE LEVEL'S SCALE FACTOR, so a
+                            // coarse-pyramid keypoint -- whose support in the source image
+                            // really is larger -- is tested over a correspondingly larger
+                            // area instead of over 3 adjacent level-0 pixels.
+                            if(!mMask.empty())
+                            {
+                                const float s  = mvScaleFactor[level];
+                                const float x0 = ((*vit).pt.x + minBorderX) * s;
+                                const float y0 = ((*vit).pt.y + minBorderY) * s;
+                                int nDynamic = 0;
+                                for(int dy = -1; dy <= 1; ++dy)
+                                {
+                                    for(int dx = -1; dx <= 1; ++dx)
+                                    {
+                                        const int xx = cvRound(x0 + dx*s);
+                                        const int yy = cvRound(y0 + dy*s);
+                                        if(xx < 0 || yy < 0 || xx >= mMask.cols || yy >= mMask.rows)
+                                            continue;
+                                        if(mMask.at<uchar>(yy,xx) == 0)
+                                            ++nDynamic;
+                                    }
+                                }
+                                if(nDynamic >= 5)
+                                    continue;
+                            }
+
                             vToDistributeKeys.push_back(*vit);
                         }
                     }
@@ -1092,6 +1132,31 @@ namespace ORB_SLAM3
 
         Mat image = _image.getMat();
         assert(image.type() == CV_8UC1 );
+
+        // Latch the dynamic-object mask for ComputeKeyPointsOctTree. Validate rather
+        // than trust: a mask of the wrong size would be read out of bounds, and one of
+        // the wrong type would be misinterpreted byte-wise. Either way, fall back to
+        // "no filtering" -- degraded tracking beats a crash or a silently wrong map.
+        if(_mask.empty())
+            mMask = Mat();
+        else
+        {
+            Mat mask = _mask.getMat();
+            if(mask.size() == image.size() && mask.type() == CV_8UC1)
+                mMask = mask;
+            else
+            {
+                mMask = Mat();
+                if(!mbMaskWarned)
+                {
+                    mbMaskWarned = true;
+                    std::cerr << "[ORBextractor] ignoring dynamic mask: expected CV_8UC1 "
+                              << image.cols << "x" << image.rows << ", got "
+                              << mask.cols << "x" << mask.rows << " type " << mask.type()
+                              << std::endl;
+                }
+            }
+        }
 
         // Pre-compute the scale pyramid
         ComputePyramid(image);
