@@ -130,6 +130,19 @@ public:
         BINARY_FILE=1,
     };
 
+    // Per-box feature census for motion-gated masking (orbslam3_ros2). For each
+    // box handed to TrackStereo(voteBoxes), how many left keypoints of the frame
+    // fell inside it and how many of those ended the frame as pose-optimisation
+    // inliers (a map point that survived TrackLocalMap). A static object scores
+    // like the background; a moving one does not, because its map points were
+    // triangulated where it USED to be. Raw counts only -- the threshold and the
+    // frame-to-frame association are policy and live in the ROS node.
+    struct BoxVote
+    {
+        int n_kp = 0;
+        int n_inlier = 0;
+    };
+
 public:
     EIGEN_MAKE_ALIGNED_OPERATOR_NEW
     // Initialize the SLAM system. It launches the Local Mapping, Loop Closing and Viewer threads.
@@ -144,7 +157,20 @@ public:
     // landing on a dynamic region are discarded inside ORBextractor before the octree
     // distributes the per-level feature quota. An empty Mat (the default) disables
     // masking entirely and restores stock upstream behaviour exactly.
-    Sophus::SE3f TrackStereo(const cv::Mat &imLeft, const cv::Mat &imRight, const double &timestamp, const vector<IMU::Point>& vImuMeas = vector<IMU::Point>(), string filename="", const cv::Mat &maskLeft = cv::Mat(), const cv::Mat &maskRight = cv::Mat());
+    //
+    // voteBoxes (optional, ORIGINAL image coordinates; scaled here exactly as the
+    // masks are) requests a BoxVote census of this frame, read back afterwards
+    // with GetBoxVotes(). Empty = no census, no cost.
+    Sophus::SE3f TrackStereo(const cv::Mat &imLeft, const cv::Mat &imRight, const double &timestamp, const vector<IMU::Point>& vImuMeas = vector<IMU::Point>(), string filename="", const cv::Mat &maskLeft = cv::Mat(), const cv::Mat &maskRight = cv::Mat(), const std::vector<cv::Rect2f> &voteBoxes = std::vector<cv::Rect2f>());
+
+    // Census of the most recent TrackStereo call that passed voteBoxes: one entry
+    // per box in the same order, plus the keypoints outside every box.
+    void GetBoxVotes(std::vector<BoxVote> &boxes, BoxVote &background);
+    // A map point counts as an inlier for the census only if it was created at
+    // least this many frames ago. Local mapping re-anchors fresh points on a slow
+    // mover at every keyframe (~10 frames), and 0.3 s of baseline is not enough
+    // to expose 2 px/frame of motion; 30 frames (1 s) is. Default 30.
+    void SetBoxVoteMinAge(int frames) { mBoxVoteMinAge = frames; }
 
     // Process the given rgbd frame. Depthmap must be registered to the RGB frame.
     // Input image: RGB (CV_8UC3) or grayscale (CV_8U). RGB is converted to grayscale.
@@ -301,6 +327,9 @@ private:
     int mTrackingState;
     std::vector<MapPoint*> mTrackedMapPoints;
     std::vector<cv::KeyPoint> mTrackedKeyPointsUn;
+    std::vector<BoxVote> mLastBoxVotes;
+    BoxVote mLastBgVote;
+    int mBoxVoteMinAge = 30;
     std::mutex mMutexState;
 
     //

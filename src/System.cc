@@ -19,6 +19,7 @@
 
 
 #include "System.h"
+#include <algorithm>
 #include "Converter.h"
 #include <thread>
 #include <pangolin/pangolin.h>
@@ -241,7 +242,7 @@ System::System(const string &strVocFile, const string &strSettingsFile, const eS
 
 }
 
-Sophus::SE3f System::TrackStereo(const cv::Mat &imLeft, const cv::Mat &imRight, const double &timestamp, const vector<IMU::Point>& vImuMeas, string filename, const cv::Mat &maskLeft, const cv::Mat &maskRight)
+Sophus::SE3f System::TrackStereo(const cv::Mat &imLeft, const cv::Mat &imRight, const double &timestamp, const vector<IMU::Point>& vImuMeas, string filename, const cv::Mat &maskLeft, const cv::Mat &maskRight, const std::vector<cv::Rect2f> &voteBoxes)
 {
     if(mSensor!=STEREO && mSensor!=IMU_STEREO)
     {
@@ -338,7 +339,50 @@ Sophus::SE3f System::TrackStereo(const cv::Mat &imLeft, const cv::Mat &imRight, 
     mTrackedMapPoints = mpTracker->mCurrentFrame.mvpMapPoints;
     mTrackedKeyPointsUn = mpTracker->mCurrentFrame.mvKeysUn;
 
+    // Box census for motion-gated masking. Keypoints live in the FED image's
+    // coordinates, so the boxes get the same scale the masks got above. A
+    // keypoint inside overlapping boxes is credited to the first one.
+    mLastBoxVotes.assign(voteBoxes.size(), BoxVote());
+    mLastBgVote = BoxVote();
+    if(!voteBoxes.empty())
+    {
+        const Frame &F = mpTracker->mCurrentFrame;
+        const float sx = imLeft.cols > 0 ? static_cast<float>(imLeftToFeed.cols) / imLeft.cols : 1.f;
+        const float sy = imLeft.rows > 0 ? static_cast<float>(imLeftToFeed.rows) / imLeft.rows : 1.f;
+        std::vector<cv::Rect2f> scaled(voteBoxes.size());
+        for(size_t j = 0; j < voteBoxes.size(); ++j)
+            scaled[j] = cv::Rect2f(voteBoxes[j].x * sx, voteBoxes[j].y * sy,
+                                   voteBoxes[j].width * sx, voteBoxes[j].height * sy);
+        const size_t N = F.mvKeys.size();
+        for(size_t i = 0; i < N; ++i)
+        {
+            // Observations() > 0 restricts the census to map points anchored at
+            // keyframes, exactly as TrackLocalMap's own mnMatchesInliers does.
+            // Temporal points (stereo depth from the previous frame, zero
+            // observations) would let a slow mover pass: 2 px of motion per
+            // frame sits inside the projection search window, so they match
+            // and count as inliers. Only seconds of keyframe baseline expose it.
+            // ...and old enough: see SetBoxVoteMinAge.
+            MapPoint *pMP = i < F.mvpMapPoints.size() ? F.mvpMapPoints[i] : nullptr;
+            const bool inlier = pMP && pMP->Observations() > 0 &&
+                                F.mnId >= pMP->mnFirstFrame + static_cast<long unsigned int>(std::max(0, mBoxVoteMinAge)) &&
+                                !(i < F.mvbOutlier.size() && F.mvbOutlier[i]);
+            BoxVote *v = &mLastBgVote;
+            for(size_t j = 0; j < scaled.size(); ++j)
+                if(scaled[j].contains(F.mvKeys[i].pt)) { v = &mLastBoxVotes[j]; break; }
+            ++v->n_kp;
+            if(inlier) ++v->n_inlier;
+        }
+    }
+
     return Tcw;
+}
+
+void System::GetBoxVotes(std::vector<BoxVote> &boxes, BoxVote &background)
+{
+    unique_lock<mutex> lock(mMutexState);
+    boxes = mLastBoxVotes;
+    background = mLastBgVote;
 }
 
 Sophus::SE3f System::TrackRGBD(const cv::Mat &im, const cv::Mat &depthmap, const double &timestamp, const vector<IMU::Point>& vImuMeas, string filename)
