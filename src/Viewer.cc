@@ -380,6 +380,17 @@ void Viewer::Run()
             break;
     }
 
+    // orbslam3_ros2 patch (9): tear the windows down on THIS thread, which owns
+    // the GL context, BEFORE SetFinish() releases System::Shutdown(). Otherwise
+    // Pangolin's global window registry is destroyed by the main thread inside
+    // _dl_fini with no current GL context and the process segfaults at exit:
+    //   glDeleteTextures <- GlFont::~GlFont <- PangolinGl::~PangolinGl
+    //   <- ~map<string, shared_ptr<PangolinGl>> <- __do_global_dtors_aux
+    // Companion to patch (8), which is what makes this code reachable at all.
+    // Pure insertion -- no upstream line is removed.
+    cv::destroyAllWindows();
+    pangolin::DestroyWindow("ORB-SLAM3: Map Viewer");
+
     SetFinish();
 }
 

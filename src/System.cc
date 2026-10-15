@@ -664,12 +664,26 @@ void System::Shutdown()
 
     mpLocalMapper->RequestFinish();
     mpLoopCloser->RequestFinish();
-    /*if(mpViewer)
+    // orbslam3_ros2 patch (8): stop the Viewer thread before teardown. Upstream
+    // leaves this commented out, so with use_viewer:=true Viewer::Run() is still
+    // inside cv::waitKey()'s GTK main loop when main() returns and the process
+    // dies in libgtk/libcanberra at exit -- SIGSEGV or SIGTRAP, AFTER every
+    // output file has been written and shutdown_status=graceful logged. gdb:
+    //   libgtk-3 <- cvWaitKey <- cv::waitKey <- ORB_SLAM3::Viewer::Run
+    // Bounded wait (<= 2 s) so a wedged viewer can never hang shutdown.
+    // Original lines, kept for reference:
+    // /*if(mpViewer)
+    // {
+    //     mpViewer->RequestFinish();
+    //     while(!mpViewer->isFinished())
+    //         usleep(5000);
+    // }*/
+    if(mpViewer)
     {
         mpViewer->RequestFinish();
-        while(!mpViewer->isFinished())
+        for(int i = 0; i < 400 && !mpViewer->isFinished(); ++i)
             usleep(5000);
-    }*/
+    }
 
     // Wait until all estimator threads have stopped before exporting final
     // trajectories. Otherwise a loop correction or GBA can revise the map while

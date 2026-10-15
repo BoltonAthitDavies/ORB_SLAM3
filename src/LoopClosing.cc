@@ -41,6 +41,15 @@ LoopClosing::LoopClosing(Atlas *pAtlas, KeyFrameDatabase *pDB, ORBVocabulary *pV
 {
     mnCovisibilityConsistencyTh = 3;
     mpLastCurrentKF = static_cast<KeyFrame*>(NULL);
+    // orbslam3_ros2 patch (7): upstream never initialises mpCurrentKF. Its only
+    // assignment is in NewDetectCommonRegions() AFTER the !mbActiveLC early
+    // return, so with loopClosing:0 Run() reads uninitialised heap garbage at
+    // the "place_recognition" log line and copies it into mpLastCurrentKF.
+    // Harmless while the garbage happens to be zero (every OFF run logged
+    // current_keyframe_id=-1); fatal once a 64 MB LoadAtlasFromFile has dirtied
+    // the heap before `new LoopClosing` -> SIGSEGV in LoopClosing::Run() on the
+    // first keyframe. Confirmed by gdb on dataset_allsensor_realistic_003.
+    mpCurrentKF = static_cast<KeyFrame*>(NULL);
 
 #ifdef REGISTER_TIMES
 
@@ -402,8 +411,17 @@ bool LoopClosing::CheckNewKeyFrames()
 bool LoopClosing::NewDetectCommonRegions()
 {
     // To deactivate placerecognition. No loopclosing nor merging will be performed
-    if(!mbActiveLC)
-        return false;
+    //
+    // orbslam3_ros2 patch (7): the early return used to sit HERE, before the
+    // queue pop. With loopClosing:0 the keyframe was therefore never dequeued,
+    // CheckNewKeyFrames() stayed true forever and Run() busy-spun at 100 % CPU,
+    // writing one junk "place_recognition" row per spin (64254 rows on
+    // dataset_allsensor_003 logging_02) and never adding anything to
+    // mpKeyFrameDB -- which also starved Tracking::Relocalization() of
+    // candidates. Moved below the pop and given the same "skip this KF" body as
+    // the three gates that follow it. Original lines, kept for reference:
+    // if(!mbActiveLC)
+    //     return false;
 
     {
         unique_lock<mutex> lock(mMutexLoopQueue);
@@ -414,6 +432,13 @@ bool LoopClosing::NewDetectCommonRegions()
         mpCurrentKF->mbCurrentPlaceRecognition = true;
 
         mpLastMap = mpCurrentKF->GetMap();
+    }
+
+    if(!mbActiveLC)
+    {
+        mpKeyFrameDB->add(mpCurrentKF);
+        mpCurrentKF->SetErase();
+        return false;
     }
 
     if(mpLastMap->IsInertial() && !mpLastMap->GetIniertialBA2())

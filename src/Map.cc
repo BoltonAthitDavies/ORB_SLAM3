@@ -359,7 +359,24 @@ void Map::SetLastMapChange(int currentChangeId)
 void Map::PreSave(std::set<GeometricCamera*> &spCams)
 {
     int nMPWithoutObs = 0;
-    for(MapPoint* pMPi : mspMapPoints)
+    // orbslam3_ros2 patch (6): iterate a SNAPSHOT, not the live set.
+    //
+    // EraseObservation() below can take a point to <=2 observations, and that
+    // calls SetBadFlag() -> Map::EraseMapPoint() -> mspMapPoints.erase(pMP) --
+    // erasing the very element this range-for is standing on. Freeing that
+    // red-black-tree node makes the next ++ fault inside
+    // std::_Rb_tree_increment, so System::SaveAtlas() dies with SIGSEGV and no
+    // .osa is written. Confirmed by gdb: frames were _Rb_tree_increment <-
+    // Map::PreSave <- Atlas::PreSave <- System::SaveAtlas.
+    //
+    // Only fires when a point really does fall to <=2 obs, which is data
+    // dependent -- dataset_allsensor_realistic_001 crashes every time while
+    // other sequences saved a healthy atlas from this same build.
+    //
+    // Original line, kept for reference:
+    // for(MapPoint* pMPi : mspMapPoints)
+    const std::set<MapPoint*> spMapPointsSnapshot = mspMapPoints;
+    for(MapPoint* pMPi : spMapPointsSnapshot)
     {
         if(!pMPi || pMPi->isBad())
             continue;
