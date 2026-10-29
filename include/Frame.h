@@ -340,6 +340,13 @@ public:
     //For stereo fisheye matching
     static cv::BFMatcher BFmatcher;
 
+    // orbslam3_ros2 patch (10b), 2026-10-29: brute-force Hamming 2-NN on the GPU in
+    // ComputeStereoFishEyeMatches (GpuHamming). -1 = follow ORBextractor.useGPU
+    // (default), 0 = CPU cv::BFMatcher, 1 = GPU. Set from YAML Stereo.useGPUMatch.
+    static int sUseGPUStereoMatch;
+    static void SetUseGPUStereoMatch(int v) { sUseGPUStereoMatch = v; }
+    static bool UseGPUStereoMatch();
+
     //Triangulated stereo observations using as reference the left camera. These are
     //computed during ComputeStereoFishEyeMatches
     std::vector<Eigen::Vector3f> mvStereo3Dpoints;

@@ -60,6 +60,7 @@
 #include <iostream>
 
 #include "ORBextractor.h"
+#include "ORBextractorGPU.h"   // orbslam3_ros2 patch (10)
 
 
 using namespace cv;
@@ -778,8 +779,99 @@ namespace ORB_SLAM3
         return vResultKeys;
     }
 
+    // ------------------------------------------------------------------
+    // orbslam3_ros2 patch (10): GPU front end. Selection (DistributeOctTree)
+    // stays on the CPU; FAST scoring, NMS, blur, orientation and rBRIEF run on
+    // the GPU through ORBextractorGPU. Any failure falls back to the CPU code
+    // below for the rest of the process.
+    bool ORBextractor::sUseGPU = false;
+
+    ORBextractor::~ORBextractor() { delete mpGpu; }
+
+    bool ORBextractor::GpuReady()
+    {
+        if(!sUseGPU || mbGpuFailed) return false;
+        if(mpGpu) return true;
+        if(!GpuOrb::Available()) { mbGpuFailed = true; return false; }
+        int maxW = mvImagePyramid[0].cols + 2*EDGE_THRESHOLD, maxH = mvImagePyramid[0].rows + 2*EDGE_THRESHOLD;
+        int maxStep = (int)mvImagePyramid[0].step;
+        mpGpu = new GpuOrb();
+        if(!mpGpu->Init(nlevels, maxW, maxH, maxStep, iniThFAST, minThFAST, umax, pattern))
+        {
+            std::cerr << "[ORBextractor] GPU init failed -- using the CPU extractor" << std::endl;
+            delete mpGpu; mpGpu = nullptr; mbGpuFailed = true; return false;
+        }
+        std::cerr << "[ORBextractor] GPU front end active (FAST/NMS/blur/orientation/rBRIEF on the GPU)" << std::endl;
+        return true;
+    }
+
+    // Mirrors ComputeKeyPointsOctTree exactly: same borders, cell grid,
+    // two-threshold rule, dynamic-mask veto, DistributeOctTree, coordinate
+    // offsets and orientation -- with the per-pixel work on the GPU.
+    bool ORBextractor::GpuComputeKeyPoints(vector<vector<KeyPoint> >& allKeypoints)
+    {
+        allKeypoints.resize(nlevels);
+        const float W = 35;
+        for (int level = 0; level < nlevels; ++level)
+            if(!mpGpu->Upload(level, mvImagePyramid[level])) return false;
+        for (int level = 0; level < nlevels; ++level)
+        {
+            const int minBorderX = EDGE_THRESHOLD-3;
+            const int minBorderY = minBorderX;
+            const int maxBorderX = mvImagePyramid[level].cols-EDGE_THRESHOLD+3;
+            const int maxBorderY = mvImagePyramid[level].rows-EDGE_THRESHOLD+3;
+            const float width = (maxBorderX-minBorderX);
+            const float height = (maxBorderY-minBorderY);
+            const int nCols = width/W;
+            const int nRows = height/W;
+            const int wCell = ceil(width/nCols);
+            const int hCell = ceil(height/nRows);
+            vector<cv::KeyPoint> vCandidates;
+            if(!mpGpu->Detect(level, minBorderX, minBorderY, maxBorderX, maxBorderY, wCell, hCell, nCols, nRows, vCandidates)) return false;
+            vector<cv::KeyPoint> vToDistributeKeys;
+            vToDistributeKeys.reserve(vCandidates.size());
+            for(const KeyPoint& kp : vCandidates)
+            {
+                if(!mMask.empty())
+                {
+                    const float s  = mvScaleFactor[level];
+                    const float x0 = (kp.pt.x + minBorderX) * s;
+                    const float y0 = (kp.pt.y + minBorderY) * s;
+                    int nDynamic = 0;
+                    for(int dy = -1; dy <= 1; ++dy)
+                        for(int dx = -1; dx <= 1; ++dx)
+                        {
+                            const int xx = cvRound(x0 + dx*s);
+                            const int yy = cvRound(y0 + dy*s);
+                            if(xx < 0 || yy < 0 || xx >= mMask.cols || yy >= mMask.rows) continue;
+                            if(mMask.at<uchar>(yy,xx) == 0) ++nDynamic;
+                        }
+                    if(nDynamic >= 5) continue;
+                }
+                vToDistributeKeys.push_back(kp);
+            }
+            vector<KeyPoint> & keypoints = allKeypoints[level];
+            keypoints.reserve(nfeatures);
+            keypoints = DistributeOctTree(vToDistributeKeys, minBorderX, maxBorderX,
+                                          minBorderY, maxBorderY,mnFeaturesPerLevel[level], level);
+            const int scaledPatchSize = PATCH_SIZE*mvScaleFactor[level];
+            const int nkps = keypoints.size();
+            for(int i=0; i<nkps ; i++)
+            {
+                keypoints[i].pt.x+=minBorderX;
+                keypoints[i].pt.y+=minBorderY;
+                keypoints[i].octave=level;
+                keypoints[i].size = scaledPatchSize;
+            }
+            if(!mpGpu->Orientation(level, keypoints)) return false;
+        }
+        return true;
+    }
+
     void ORBextractor::ComputeKeyPointsOctTree(vector<vector<KeyPoint> >& allKeypoints)
     {
+        // orbslam3_ros2 patch (10): GPU path first; the CPU code below is the fallback.
+        if(GpuReady() && GpuComputeKeyPoints(allKeypoints)) return;
         allKeypoints.resize(nlevels);
 
         const float W = 35;
@@ -1194,13 +1286,23 @@ namespace ORB_SLAM3
                 continue;
 
             // preprocess the resized image
-            Mat workingMat = mvImagePyramid[level].clone();
-            GaussianBlur(workingMat, workingMat, Size(7, 7), 2, 2, BORDER_REFLECT_101);
-
-            // Compute the descriptors
-            //Mat desc = descriptors.rowRange(offset, offset + nkeypointsLevel);
             Mat desc = cv::Mat(nkeypointsLevel, 32, CV_8U);
-            computeDescriptors(workingMat, keypoints, desc, pattern);
+            // orbslam3_ros2 patch (10): blur + rBRIEF on the GPU when active.
+            // Original lines, kept for reference and as the fallback:
+            // Mat workingMat = mvImagePyramid[level].clone();
+            // GaussianBlur(workingMat, workingMat, Size(7, 7), 2, 2, BORDER_REFLECT_101);
+            // 
+            // // Compute the descriptors
+            // //Mat desc = descriptors.rowRange(offset, offset + nkeypointsLevel);
+            // Mat desc = cv::Mat(nkeypointsLevel, 32, CV_8U);
+            // computeDescriptors(workingMat, keypoints, desc, pattern);
+            bool gpuDone = (sUseGPU && mpGpu && !mbGpuFailed) ? mpGpu->Describe(level, keypoints, desc) : false;
+            if(!gpuDone)
+            {
+                Mat workingMat = mvImagePyramid[level].clone();
+                GaussianBlur(workingMat, workingMat, Size(7, 7), 2, 2, BORDER_REFLECT_101);
+                computeDescriptors(workingMat, keypoints, desc, pattern);
+            }
 
             offset += nkeypointsLevel;
 

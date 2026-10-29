@@ -27,6 +27,9 @@
 namespace ORB_SLAM3
 {
 
+class GpuOrb;   // orbslam3_ros2 patch (10): optional GPU front end, see ORBextractorGPU.h
+
+
 class ExtractorNode
 {
 public:
@@ -49,7 +52,7 @@ public:
     ORBextractor(int nfeatures, float scaleFactor, int nlevels,
                  int iniThFAST, int minThFAST);
 
-    ~ORBextractor(){}
+    ~ORBextractor();   // orbslam3_ros2 patch (10): releases the GPU front end (was the empty inline body)
 
     // Compute the ORB features and descriptors on an image.
     // ORB are dispersed on the image using an octree.
@@ -59,6 +62,11 @@ public:
     // are dropped BEFORE DistributeOctTree runs, so the octree refills the level's
     // feature quota from the surviving static keypoints instead of leaving a hole.
     // An empty Mat disables masking and reproduces stock upstream behaviour exactly.
+    // orbslam3_ros2 patch (10): process-wide switch, read from the YAML key
+    // ORBextractor.useGPU by System. Off by default; the CPU path is untouched.
+    static void SetUseGPU(bool b) { sUseGPU = b; }
+    static bool UseGPU() { return sUseGPU; }
+
     int operator()( cv::InputArray _image, cv::InputArray _mask,
                     std::vector<cv::KeyPoint>& _keypoints,
                     cv::OutputArray _descriptors, std::vector<int> &vLappingArea);
@@ -104,6 +112,13 @@ protected:
     /// threads but through two DISTINCT ORBextractor objects (mpORBextractorLeft
     /// and mpORBextractorRight), so the two threads never share this field.
     cv::Mat mMask;
+
+    // orbslam3_ros2 patch (10)
+    static bool sUseGPU;
+    GpuOrb* mpGpu = nullptr;
+    bool mbGpuFailed = false;
+    bool GpuReady();                                                     // lazy init, false -> CPU
+    bool GpuComputeKeyPoints(std::vector<std::vector<cv::KeyPoint> >& allKeypoints);
     /// Latches the "mask does not match the image" complaint so a misconfigured
     /// run warns once instead of once per frame per pyramid level.
     bool mbMaskWarned = false;

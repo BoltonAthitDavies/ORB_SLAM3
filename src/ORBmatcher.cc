@@ -1970,13 +1970,27 @@ namespace ORB_SLAM3
 
                         if(mbCheckOrientation)
                         {
-                            float rot = pKF->mvKeysUn[i].angle-CurrentFrame.mvKeysUn[bestIdx2].angle;
+                            // float rot = pKF->mvKeysUn[i].angle-CurrentFrame.mvKeysUn[bestIdx2].angle;   // orbslam3_ros2 patch (11), 2026-10-29: out-of-bounds for fisheye stereo
+                            // Fisheye (KannalaBrandt8) frames have mDistCoef == 0, so mvKeysUn = mvKeys holds only the
+                            // NLeft left-camera keypoints while GetMapPointMatches() is NLeft+NRight long; a map point first
+                            // seen through the right camera (i >= NLeft) read past the vector, gave a NaN angle, bin = INT_MIN,
+                            // and rotHist[bin] segfaulted (gdb, realv5, Tracking::Relocalization). Same guard as the other
+                            // SearchByProjection variants.
+                            const float angKF = (pKF->NLeft == -1) ? pKF->mvKeysUn[i].angle
+                                              : (i < (size_t)pKF->NLeft) ? pKF->mvKeys[i].angle
+                                                                         : pKF->mvKeysRight[i - pKF->NLeft].angle;
+                            const float angCF = (CurrentFrame.Nleft == -1) ? CurrentFrame.mvKeysUn[bestIdx2].angle
+                                              : (bestIdx2 < CurrentFrame.Nleft) ? CurrentFrame.mvKeys[bestIdx2].angle
+                                                                                : CurrentFrame.mvKeysRight[bestIdx2 - CurrentFrame.Nleft].angle;
+                            float rot = angKF-angCF;
                             if(rot<0.0)
                                 rot+=360.0f;
                             int bin = round(rot*factor);
                             if(bin==HISTO_LENGTH)
                                 bin=0;
                             assert(bin>=0 && bin<HISTO_LENGTH);
+                            if(bin<0 || bin>=HISTO_LENGTH)   // patch (11): never index the histogram with a NaN-derived bin
+                                continue;
                             rotHist[bin].push_back(bestIdx2);
                         }
                     }

@@ -22,6 +22,7 @@
 #include "MapPoint.h"
 #include "KeyFrame.h"
 #include "ORBextractor.h"
+#include "ORBextractorGPU.h"   // orbslam3_ros2 patch (10b): GpuHamming
 #include "Converter.h"
 #include "ORBmatcher.h"
 #include "GeometricCamera.h"
@@ -41,6 +42,10 @@ float Frame::mfGridElementWidthInv, Frame::mfGridElementHeightInv;
 
 //For stereo fisheye matching
 cv::BFMatcher Frame::BFmatcher = cv::BFMatcher(cv::NORM_HAMMING);
+
+// orbslam3_ros2 patch (10b), 2026-10-29
+int Frame::sUseGPUStereoMatch = -1;
+bool Frame::UseGPUStereoMatch() { return sUseGPUStereoMatch < 0 ? ORBextractor::UseGPU() : sUseGPUStereoMatch > 0; }
 
 Frame::Frame(): mpcpi(NULL), mpImuPreintegrated(NULL), mpPrevFrame(NULL), mpImuPreintegratedFrame(NULL), mpReferenceKF(static_cast<KeyFrame*>(NULL)), mbIsSet(false), mbImuPreintegrated(false), mbHasPose(false), mbHasVelocity(false)
 {
@@ -1146,7 +1151,10 @@ void Frame::ComputeStereoFishEyeMatches() {
     //Perform a brute force between Keypoint in the left and right image
     vector<vector<cv::DMatch>> matches;
 
-    BFmatcher.knnMatch(stereoDescLeft,stereoDescRight,matches,2);
+    // BFmatcher.knnMatch(stereoDescLeft,stereoDescRight,matches,2);   // orbslam3_ros2 patch (10b), 2026-10-29: CPU brute force kept as the fallback below
+    bool gpuMatched = UseGPUStereoMatch() && GpuHamming::Knn2(stereoDescLeft, stereoDescRight, matches);
+    if(!gpuMatched)
+        BFmatcher.knnMatch(stereoDescLeft,stereoDescRight,matches,2);
 
     int nMatches = 0;
     int descMatches = 0;

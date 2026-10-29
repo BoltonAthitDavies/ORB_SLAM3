@@ -59,6 +59,7 @@ src/Tracking.cc
 src/LocalMapping.cc
 src/LoopClosing.cc
 src/ORBextractor.cc
+src/ORBextractorGPU.cc
 src/ORBmatcher.cc
 src/FrameDrawer.cc
 src/Converter.cc
@@ -123,6 +124,7 @@ ${PROJECT_SOURCE_DIR}/Thirdparty/DBoW2/lib/libDBoW2.so
 ${PROJECT_SOURCE_DIR}/Thirdparty/g2o/lib/libg2o.so
 -lboost_serialization
 -lcrypto
+${CMAKE_DL_LIBS}
 )
 
 # If RealSense SDK is found the library is added and its examples compiled

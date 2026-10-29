@@ -19,6 +19,7 @@
 
 
 #include "System.h"
+#include "ORBextractor.h"
 #include <algorithm>
 #include "Converter.h"
 #include <thread>
@@ -99,6 +100,18 @@ System::System(const string &strVocFile, const string &strSettingsFile, const eS
         }
     }
 
+    // orbslam3_ros2 patch (10): ORBextractor.useGPU (0/1 int, absent = 0).
+    {
+        cv::FileNode gpuNode = fsSettings["ORBextractor.useGPU"];
+        if(!gpuNode.empty())
+            ORBextractor::SetUseGPU(static_cast<int>(gpuNode) != 0);
+    }
+    // orbslam3_ros2 patch (10b): Stereo.useGPUMatch (0/1 int; absent = follow ORBextractor.useGPU).
+    {
+        cv::FileNode gpuMatchNode = fsSettings["Stereo.useGPUMatch"];
+        if(!gpuMatchNode.empty())
+            Frame::SetUseGPUStereoMatch(static_cast<int>(gpuMatchNode) != 0 ? 1 : 0);
+    }
     node = fsSettings["loopClosing"];
     bool activeLC = true;
     if(!node.empty())
