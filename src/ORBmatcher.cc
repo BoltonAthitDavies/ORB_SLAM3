@@ -1269,7 +1269,11 @@ namespace ORB_SLAM3
                 if(kpLevel<nPredictedLevel-1 || kpLevel>nPredictedLevel)
                     continue;
 
-                if(pKF->mvuRight[idx]>=0)
+                // if(pKF->mvuRight[idx]>=0)   // orbslam3_ros2 patch (12), 2026-11-02: on fisheye mvuRight is NLeft-sized and never >= 0; with bRight the
+
+                // index is a right-grid index that can exceed NLeft, so only consult it on the pinhole path
+
+                if(pKF -> NLeft == -1 && pKF->mvuRight[idx]>=0)
                 {
                     // Check reprojection error in stereo
                     const float &kpx = kp.pt.x;

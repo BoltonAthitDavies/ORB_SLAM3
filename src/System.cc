@@ -106,6 +106,12 @@ System::System(const string &strVocFile, const string &strSettingsFile, const eS
         if(!gpuNode.empty())
             ORBextractor::SetUseGPU(static_cast<int>(gpuNode) != 0);
     }
+    // orbslam3_ros2 patch (12b): LocalMapping.redundantTh (float; absent = upstream; 1.0 = never cull keyframes).
+    {
+        cv::FileNode thNode = fsSettings["LocalMapping.redundantTh"];
+        if(!thNode.empty())
+            LocalMapping::SetRedundantTh(static_cast<float>(thNode.real()));
+    }
     // orbslam3_ros2 patch (10b): Stereo.useGPUMatch (0/1 int; absent = follow ORBextractor.useGPU).
     {
         cv::FileNode gpuMatchNode = fsSettings["Stereo.useGPUMatch"];

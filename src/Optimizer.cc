@@ -3653,6 +3653,10 @@ void Optimizer::LocalBundleAdjustment(KeyFrame* pMainKF,vector<KeyFrame*> vpAdju
         for(map<KeyFrame*,tuple<int,int>>::const_iterator mit=observations.begin(); mit!=observations.end(); mit++)
         {
             KeyFrame* pKF = mit->first;
+            // orbslam3_ros2 patch (12), 2026-11-02: a right-camera-only observation carries get<0> == -1 and these loops index
+            // mvKeysUn / mvuRight / GetMapPoint with it; upstream predates fisheye here, so skip such observations.
+            if(get<0>(mit->second) == -1)
+                continue;
             if(pKF->isBad() || pKF->mnId>maxKFid || pKF->mnBALocalForMerge != pMainKF->mnId || !pKF->GetMapPoint(get<0>(mit->second)))
                 continue;
 
@@ -3853,6 +3857,10 @@ void Optimizer::LocalBundleAdjustment(KeyFrame* pMainKF,vector<KeyFrame*> vpAdju
         for(map<KeyFrame*,tuple<int,int>>::const_iterator mit=observations.begin(); mit!=observations.end(); mit++)
         {
             KeyFrame* pKF = mit->first;
+            // orbslam3_ros2 patch (12), 2026-11-02: a right-camera-only observation carries get<0> == -1 and these loops index
+            // mvKeysUn / mvuRight / GetMapPoint with it; upstream predates fisheye here, so skip such observations.
+            if(get<0>(mit->second) == -1)
+                continue;
             if(pKF->isBad() || pKF->mnId>maxKFid || pKF->mnBALocalForKF != pMainKF->mnId || !pKF->GetMapPoint(get<0>(mit->second)))
                 continue;
 

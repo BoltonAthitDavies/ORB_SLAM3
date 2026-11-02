@@ -43,6 +43,10 @@ class Atlas;
 class LocalMapping
 {
 public:
+    // orbslam3_ros2 patch (12b), 2026-11-02: keyframe-culling redundancy threshold override from YAML
+    // LocalMapping.redundantTh (absent = upstream 0.9 / 0.5 for stereo-inertial; 1.0 = never cull).
+    static void SetRedundantTh(float th) { sRedundantTh = th; }
+    static float sRedundantTh;
     EIGEN_MAKE_ALIGNED_OPERATOR_NEW
     LocalMapping(System* pSys, Atlas* pAtlas, const float bMonocular, bool bInertial, const string &_strSeqName=std::string());
 

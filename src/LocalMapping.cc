@@ -31,6 +31,9 @@
 namespace ORB_SLAM3
 {
 
+// orbslam3_ros2 patch (12b), 2026-11-02: -1 = use the upstream threshold
+float LocalMapping::sRedundantTh = -1.0f;
+
 LocalMapping::LocalMapping(System* pSys, Atlas *pAtlas, const float bMonocular, bool bInertial, const string &_strSeqName):
     mpSystem(pSys), mbMonocular(bMonocular), mbInertial(bInertial), mbResetRequested(false), mbResetRequestedActiveMap(false), mbFinishRequested(false), mbFinished(true), mpAtlas(pAtlas), bInitializing(false),
     mbAbortBA(false), mbStopped(false), mbStopRequested(false), mbNotStop(false), mbAcceptKeyFrames(true),
@@ -566,7 +569,8 @@ void LocalMapping::CreateNewMapPoints()
             const cv::KeyPoint &kp1 = (mpCurrentKeyFrame -> NLeft == -1) ? mpCurrentKeyFrame->mvKeysUn[idx1]
                                                                          : (idx1 < mpCurrentKeyFrame -> NLeft) ? mpCurrentKeyFrame -> mvKeys[idx1]
                                                                                                                : mpCurrentKeyFrame -> mvKeysRight[idx1 - mpCurrentKeyFrame -> NLeft];
-            const float kp1_ur=mpCurrentKeyFrame->mvuRight[idx1];
+            // const float kp1_ur=mpCurrentKeyFrame->mvuRight[idx1];   // orbslam3_ros2 patch (12), 2026-11-02: mvuRight is NLeft-sized on fisheye; idx1 may be a right-camera index
+            const float kp1_ur = (mpCurrentKeyFrame -> NLeft == -1 || idx1 < mpCurrentKeyFrame -> NLeft) ? mpCurrentKeyFrame->mvuRight[idx1] : -1.0f;
             bool bStereo1 = (!mpCurrentKeyFrame->mpCamera2 && kp1_ur>=0);
             const bool bRight1 = (mpCurrentKeyFrame -> NLeft == -1 || idx1 < mpCurrentKeyFrame -> NLeft) ? false
                                                                                                          : true;
@@ -575,7 +579,8 @@ void LocalMapping::CreateNewMapPoints()
                                                             : (idx2 < pKF2 -> NLeft) ? pKF2 -> mvKeys[idx2]
                                                                                      : pKF2 -> mvKeysRight[idx2 - pKF2 -> NLeft];
 
-            const float kp2_ur = pKF2->mvuRight[idx2];
+            // const float kp2_ur = pKF2->mvuRight[idx2];   // orbslam3_ros2 patch (12), 2026-11-02: same guard as kp1_ur
+            const float kp2_ur = (pKF2 -> NLeft == -1 || idx2 < pKF2 -> NLeft) ? pKF2->mvuRight[idx2] : -1.0f;
             bool bStereo2 = (!pKF2->mpCamera2 && kp2_ur>=0);
             const bool bRight2 = (pKF2 -> NLeft == -1 || idx2 < pKF2 -> NLeft) ? false
                                                                                : true;
@@ -994,6 +999,12 @@ void LocalMapping::KeyFrameCulling()
         redundant_th = 0.9;
     else
         redundant_th = 0.5;
+    // orbslam3_ros2 patch (12b), 2026-11-02: YAML LocalMapping.redundantTh overrides the fraction above (1.0 = never
+    // cull). Added as an A/B lever: on the fisheye stereo-inertial rig, patch (12) made this test exact and
+    // the keyframes kept on realv6 fell from 326/425 to 118/469 with the ATE going 0.41 -> 4.6 m, so the
+    // upstream 0.5 is under test, not assumed.
+    if(sRedundantTh >= 0.0f)
+        redundant_th = sRedundantTh;
 
     const bool bInitImu = mpAtlas->isImuInitialized();
     int count=0;
@@ -1036,6 +1047,11 @@ void LocalMapping::KeyFrameCulling()
                 {
                     if(!mbMonocular)
                     {
+                        // orbslam3_ros2 patch (12), 2026-11-02: mvDepth has only NLeft entries on a fisheye stereo
+                        // keyframe; a right-camera-only observation (i >= NLeft) has no depth, so skip it as
+                        // "no depth" instead of reading past the vector.
+                        if(pKF -> NLeft != -1 && i >= (size_t)pKF -> NLeft)
+                            continue;
                         if(pKF->mvDepth[i]>pKF->mThDepth || pKF->mvDepth[i]<0)
                             continue;
                     }
@@ -1043,9 +1059,15 @@ void LocalMapping::KeyFrameCulling()
                     nMPs++;
                     if(pMP->Observations()>thObs)
                     {
-                        const int &scaleLevel = (pKF -> NLeft == -1) ? pKF->mvKeysUn[i].octave
-                                                                     : (i < pKF -> NLeft) ? pKF -> mvKeys[i].octave
-                                                                                          : pKF -> mvKeysRight[i].octave;
+                        // const int &scaleLevel = (pKF -> NLeft == -1) ? pKF->mvKeysUn[i].octave                       // orbslam3_ros2 patch (12), 2026-11-02:
+                        //                                              : (i < pKF -> NLeft) ? pKF -> mvKeys[i].octave     // upstream indexed
+                        //                                                                   : pKF -> mvKeysRight[i].octave; // mvKeysRight with the FULL index
+                        // For a fisheye stereo keyframe a map point first seen by the right camera has i >= NLeft, and
+                        // mvKeysRight[i] (instead of [i - NLeft]) read past the vector; the reference was dereferenced
+                        // below and segfaulted in KeyFrameCulling (kernel log, realv6, 3 crashes at one instruction).
+                        const int scaleLevel = (pKF -> NLeft == -1) ? pKF->mvKeysUn[i].octave
+                                                                    : (i < (size_t)pKF -> NLeft) ? pKF -> mvKeys[i].octave
+                                                                                                 : pKF -> mvKeysRight[i - pKF -> NLeft].octave;
                         const map<KeyFrame*, tuple<int,int>> observations = pMP->GetObservations();
                         int nObs=0;
                         for(map<KeyFrame*, tuple<int,int>>::const_iterator mit=observations.begin(), mend=observations.end(); mit!=mend; mit++)
