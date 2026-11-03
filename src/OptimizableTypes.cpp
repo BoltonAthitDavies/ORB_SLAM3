@@ -147,7 +147,11 @@ namespace ORB_SLAM3 {
         double y = xyz_trans[1];
         double z = xyz_trans[2];
 
-        auto projectJac = -pCamera->projectJac(xyz_trans);
+        // auto projectJac = -pCamera->projectJac(xyz_trans);   // orbslam3_ros2 patch (14b), 2026-11-03: `auto` deduces an Eigen
+        // EXPRESSION that keeps a reference to the temporary returned by projectJac(); that temporary
+        // dies at the end of this statement, so the two uses below read a dead stack slot (AddressSanitizer:
+        // stack-use-after-scope, 24 hits in 66 s of realv6, from LocalBundleAdjustment). Materialise it.
+        const Eigen::Matrix<double,2,3> projectJac = -pCamera->projectJac(xyz_trans);
 
         _jacobianOplusXi =  projectJac * T.rotation().toRotationMatrix();
 

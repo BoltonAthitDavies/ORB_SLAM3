@@ -18,6 +18,7 @@
 
 
 #include "Optimizer.h"
+#include <iomanip>
 
 
 #include <complex>
@@ -2835,7 +2836,19 @@ void Optimizer::LocalInertialBA(KeyFrame *pKF, bool *pbStopFlag, Map *pMap, int&
     //cout << "Total map points: " << lLocalMapPoints.size() << endl;
     for(map<int,int>::iterator mit=mVisEdges.begin(), mend=mVisEdges.end(); mit!=mend; mit++)
     {
-        assert(mit->second>=3);
+        // assert(mit->second>=3);   // orbslam3_ros2 patch (14a), 2026-11-03: upstream's debug-only check (compiled out
+        // with NDEBUG in every Release build, so production silently continues). A keyframe in the
+        // local inertial window with < 3 visual edges is held by its IMU edges alone; on the real rig
+        // this fired at 66 s of realv6 under the sanitiser build. Log it instead of aborting, with
+        // whether the keyframe is optimised or fixed, so the runaway can be correlated with it.
+        if(mit->second < 3)
+        {
+            bool bOpt = false;
+            for(size_t i = 0; i < vpOptimizableKFs.size(); i++) if((int)vpOptimizableKFs[i]->mnId == mit->first) { bOpt = true; break; }
+            std::cerr << "[LocalInertialBA] keyframe " << mit->first << (bOpt ? " (OPTIMISED)" : " (fixed)")
+                      << " has only " << mit->second << " visual edges in the window (current KF " << pKF->mnId
+                      << ", t=" << std::fixed << std::setprecision(3) << pKF->mTimeStamp << ")" << std::endl;
+        }
     }
 
     // Export the actual inertial-LBA problem size through the existing

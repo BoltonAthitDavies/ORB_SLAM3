@@ -422,12 +422,16 @@ void FrameDrawer::Update(Tracking *pTracker)
                     else
                         mvbVO[i]=true;
 
-                    mmMatchedInImage[pMP->mnId] = mvCurrentKeys[i].pt;
+                    // mmMatchedInImage[pMP->mnId] = mvCurrentKeys[i].pt;   // orbslam3_ros2 patch (13), 2026-11-03: i runs to N = left+right on a fisheye
+                    //                                                      // stereo frame but mvCurrentKeys holds only the left keypoints
+                    //                                                      // (AddressSanitizer: heap-buffer-overflow READ, FrameDrawer.cc:425, every frame)
+                    mmMatchedInImage[pMP->mnId] = ((both && i >= (int)mvCurrentKeys.size()) ? mvCurrentKeysRight[i - mvCurrentKeys.size()] : mvCurrentKeys[i]).pt;
                 }
                 else
                 {
                     mvpOutlierMPs.push_back(pMP);
-                    mvOutlierKeys.push_back(mvCurrentKeys[i]);
+                    // mvOutlierKeys.push_back(mvCurrentKeys[i]);   // orbslam3_ros2 patch (13), 2026-11-03: same right-index guard
+                    mvOutlierKeys.push_back((both && i >= (int)mvCurrentKeys.size()) ? mvCurrentKeysRight[i - mvCurrentKeys.size()] : mvCurrentKeys[i]);
                 }
             }
         }
