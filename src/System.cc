@@ -112,6 +112,16 @@ System::System(const string &strVocFile, const string &strSettingsFile, const eS
         if(!thNode.empty())
             LocalMapping::SetRedundantTh(static_cast<float>(thNode.real()));
     }
+    // orbslam3_ros2 patch (15): LocalMapping.initWithBacklog / LocalMapping.resetOnLowMotion
+    // (0/1 ints; absent = upstream: no initialisation with a backlog, reset on low motion).
+    {
+        cv::FileNode n1 = fsSettings["LocalMapping.initWithBacklog"];
+        if(!n1.empty())
+            LocalMapping::SetInitWithBacklog(static_cast<int>(n1) != 0);
+        cv::FileNode n2 = fsSettings["LocalMapping.resetOnLowMotion"];
+        if(!n2.empty())
+            LocalMapping::SetResetOnLowMotion(static_cast<int>(n2) != 0);
+    }
     // orbslam3_ros2 patch (10b): Stereo.useGPUMatch (0/1 int; absent = follow ORBextractor.useGPU).
     {
         cv::FileNode gpuMatchNode = fsSettings["Stereo.useGPUMatch"];

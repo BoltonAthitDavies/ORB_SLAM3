@@ -47,6 +47,23 @@ public:
     // LocalMapping.redundantTh (absent = upstream 0.9 / 0.5 for stereo-inertial; 1.0 = never cull).
     static void SetRedundantTh(float th) { sRedundantTh = th; }
     static float sRedundantTh;
+    // orbslam3_ros2 patch (15), 2026-11-04: two YAML switches for the inertial initialisation
+    // (both absent = upstream behaviour). Found on dataset_realv7 (12 stereo-inertial runs):
+    //   LocalMapping.initWithBacklog (0/1): 1 = attempt the IMU initialisation even while new
+    //       keyframes are queued. Upstream tries it only when the queue is empty; before the
+    //       initialisation a keyframe is inserted every 0.25 s and CreateNewMapPoints takes
+    //       ~250 ms per keyframe on this rig, so the queue never emptied and the IMU never
+    //       (2 runs) or only after 37-92 s (7 runs) re-initialised. InitializeIMU drains the
+    //       queue itself, so calling it with a backlog is what upstream does on a fast machine.
+    //   LocalMapping.resetOnLowMotion (0/1): 0 = for stereo / RGB-D keep the map when two
+    //       consecutive keyframes are closer than 2 cm within 10 s of the initialisation.
+    //       Upstream resets ("Not enough motion for initializing"), which matters for the
+    //       monocular scale but throws away a stereo map whose scale is fixed; a robot that
+    //       starts from rest triggered it in 9 of the 12 runs.
+    static void SetInitWithBacklog(bool b) { sInitWithBacklog = b; }
+    static void SetResetOnLowMotion(bool b) { sResetOnLowMotion = b; }
+    static bool sInitWithBacklog;
+    static bool sResetOnLowMotion;
     EIGEN_MAKE_ALIGNED_OPERATOR_NEW
     LocalMapping(System* pSys, Atlas* pAtlas, const float bMonocular, bool bInertial, const string &_strSeqName=std::string());
 

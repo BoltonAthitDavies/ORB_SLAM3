@@ -33,6 +33,9 @@ namespace ORB_SLAM3
 
 // orbslam3_ros2 patch (12b), 2026-11-02: -1 = use the upstream threshold
 float LocalMapping::sRedundantTh = -1.0f;
+// orbslam3_ros2 patch (15): defaults = upstream behaviour (see LocalMapping.h).
+bool LocalMapping::sInitWithBacklog = false;
+bool LocalMapping::sResetOnLowMotion = true;
 
 LocalMapping::LocalMapping(System* pSys, Atlas *pAtlas, const float bMonocular, bool bInertial, const string &_strSeqName):
     mpSystem(pSys), mbMonocular(bMonocular), mbInertial(bInertial), mbResetRequested(false), mbResetRequestedActiveMap(false), mbFinishRequested(false), mbFinished(true), mpAtlas(pAtlas), bInitializing(false),
@@ -156,6 +159,24 @@ void LocalMapping::Run()
             int num_MPs_BA = 0;
             int num_edges_BA = 0;
 
+            // orbslam3_ros2 patch (15): with LocalMapping.initWithBacklog, try the inertial
+            // initialisation BEFORE the empty-queue gate below. InitializeIMU returns at once
+            // while the map has fewer than 10 keyframes or spans less than 1 s, and drains the
+            // queue itself (ProcessNewKeyFrame on each queued keyframe) when it does run, so the
+            // gated block then sees an empty queue and proceeds as upstream. Its cost is added
+            // to the same imu_initialization_ms column of local_mapping.csv.
+            if(sInitWithBacklog && mbInertial && CheckNewKeyFrames() && !stopRequested()
+               && !mpCurrentKeyFrame->GetMap()->isImuInitialized())
+            {
+                const auto evaluation_start_backlog_init = std::chrono::steady_clock::now();
+                if (mbMonocular)
+                    InitializeIMU(1e2, 1e10, true);
+                else
+                    InitializeIMU(1e2, 1e5, true);
+                evaluation_imu_initialization_ms += std::chrono::duration<double,std::milli>(
+                    std::chrono::steady_clock::now() - evaluation_start_backlog_init).count();
+            }
+
             if(!CheckNewKeyFrames() && !stopRequested())
             {
                 if(mpAtlas->KeyFramesInMap()>2)
@@ -170,7 +191,10 @@ void LocalMapping::Run()
                             mTinit += mpCurrentKeyFrame->mTimeStamp - mpCurrentKeyFrame->mPrevKF->mTimeStamp;
                         if(!mpCurrentKeyFrame->GetMap()->GetIniertialBA2())
                         {
-                            if((mTinit<10.f) && (dist<0.02))
+                            // orbslam3_ros2 patch (15): the reset is skipped for stereo / RGB-D when
+                            // LocalMapping.resetOnLowMotion is 0 (upstream line kept below).
+                            // if((mTinit<10.f) && (dist<0.02))
+                            if((mTinit<10.f) && (dist<0.02) && (sResetOnLowMotion || mbMonocular))
                             {
                                 cout << "Not enough motion for initializing. Reseting..." << endl;
                                 unique_lock<mutex> lock(mMutexReset);
@@ -235,7 +259,9 @@ void LocalMapping::Run()
                         InitializeIMU(1e2, 1e5, true);
                 }
                 const auto evaluation_after_imu_initialization = std::chrono::steady_clock::now();
-                evaluation_imu_initialization_ms = std::chrono::duration<double,std::milli>(
+                // patch (15): "+=" so that a backlog initialisation above is not overwritten.
+                // evaluation_imu_initialization_ms = std::chrono::duration<double,std::milli>(
+                evaluation_imu_initialization_ms += std::chrono::duration<double,std::milli>(
                     evaluation_after_imu_initialization - evaluation_start_imu_initialization).count();
 
 
